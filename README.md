@@ -30,7 +30,13 @@ python dataset_tool.py --source=downloads/{dataset_folder} \
     --dest=datasets/{data_name}.zip --resolution=64x64 --transform=center-crop
 python fid.py ref --data=datasets/{data_name}.zip --dest=fid-refs/{data_name}-64x64.npz
 
-For CIFAR10 dataset, you can use the following commands:
+For CIFAR10 dataset, you can use the following commands. Make sure you are in the repository root directory.
+
+cd ..
+wget -c https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz 
+mkdir -p ../data/cifar10/train
+mkdir -p ../data/cifar10/test
+
 python dataset_tool.py --source=../cifar-10-python.tar.gz \
     --dest=../data/cifar10/train --resolution=32x32 --transform=center-crop
 
@@ -49,14 +55,14 @@ torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
     --data=datasets/celeba-64x64.zip --cond=0 --arch=ddpmpp --batch=256 \
     --cres=1,2,2,2 --lr=2e-4 --dropout=0.05 --augment=0 --real_p=0.5 
 
-torchrun --standalone --nproc_per_node=2 train.py \
+CUDA_VISIBLE_DEVICES=2 torchrun --standalone --nproc_per_node=1 train.py \
     --outdir=training-runs \
     --data=../data/cifar10/train \
     --test_data=../data/cifar10/test \
     --cond=1 \
-    --arch=ebm \
+    --arch=ddpmpp \
     --batch=128 \
-    --cres=1,2,2 \
+    --cres=1,2,2,2 \
     --lr=2e-4 \
     --dropout=0.0 \
     --augment=0.0 \
@@ -66,7 +72,7 @@ torchrun --standalone --nproc_per_node=2 train.py \
 torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
     --data=datasets/lsun-bedroom-256x256.zip --cond=0 --arch=adm --train_on_latents=1 \
     --duration=200 --batch-gpu=32 --batch=1024 --lr=1e-4 --ema=50 --dropout=0.10 --fp16=1 --ls=100 \
-    --augment=0 --real_p=0.5 --resume=
+    --augment=0 --real_p=0.5
     
 # Train ADM model with Latent Diffusion Encoder for ImageNet-256x256 using 8 GPUs
 torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
