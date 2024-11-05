@@ -29,6 +29,14 @@ Resize the image to the desired resolution, e.g., 64x64 here, and compute the fi
 python dataset_tool.py --source=downloads/{dataset_folder} \
     --dest=datasets/{data_name}.zip --resolution=64x64 --transform=center-crop
 python fid.py ref --data=datasets/{data_name}.zip --dest=fid-refs/{data_name}-64x64.npz
+
+For CIFAR10 dataset, you can use the following commands:
+python dataset_tool.py --source=../cifar-10-python.tar.gz \
+    --dest=../data/cifar10/train --resolution=32x32 --transform=center-crop
+
+python dataset_tool.py --source=../cifar-10-python.tar.gz \
+    --dest=../data/cifar10/test --resolution=32x32 --transform=center-crop --is_test
+
 ```
 
 ### Train Patch Diffusion
@@ -40,12 +48,25 @@ You can train new models using `train.py`. For example:
 torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
     --data=datasets/celeba-64x64.zip --cond=0 --arch=ddpmpp --batch=256 \
     --cres=1,2,2,2 --lr=2e-4 --dropout=0.05 --augment=0 --real_p=0.5 
-    
+
+torchrun --standalone --nproc_per_node=2 train.py \
+    --outdir=training-runs \
+    --data=../data/cifar10/train \
+    --test_data=../data/cifar10/test \
+    --cond=1 \
+    --arch=ebm \
+    --batch=128 \
+    --cres=1,2,2 \
+    --lr=2e-4 \
+    --dropout=0.0 \
+    --augment=0.0 \
+    --real_p=0.5
+
 # Train ADM model with Latent Diffusion Encoder for LSUN-256x256 using 8 GPUs
 torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
     --data=datasets/lsun-bedroom-256x256.zip --cond=0 --arch=adm --train_on_latents=1 \
     --duration=200 --batch-gpu=32 --batch=1024 --lr=1e-4 --ema=50 --dropout=0.10 --fp16=1 --ls=100 \
-    --augment=0 --real_p=0.5
+    --augment=0 --real_p=0.5 --resume=
     
 # Train ADM model with Latent Diffusion Encoder for ImageNet-256x256 using 8 GPUs
 torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \
@@ -68,6 +89,9 @@ torchrun --standalone --nproc_per_node=8 generate.py --steps=50 --resolution 64 
 
 # For ADM Architecture we use
 torchrun --standalone --nproc_per_node=8 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --on_latents=1 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=/path-to-the-pkl/
+
+# For ADM Architecture we use
+torchrun --standalone --nproc_per_node=1 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=training-runs/00095-cifar10-cond-adm-pedm-gpus2-batch64-fp32/network-snapshot-002504.pkl --cfg=1.3
 ```
 
 We share our pretrained model checkpoints at [Huggingface Page](https://huggingface.co/zhendongw/patch-diffusion/tree/main). For ImageNet dataset, to generate with classifier-free-guidance, please add `--cfg=1.3` to the command. 
