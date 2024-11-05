@@ -33,6 +33,7 @@ def set_requires_grad(model, value):
 
 
 # ----------------------------------------------------------------------------
+# Expected Calibration Error (ECE) metric for classification task.
 
 
 class ECELoss(nn.Module):
@@ -166,9 +167,11 @@ def training_loop(
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **data_loader_kwargs))
 
+    # -------------------------------------------------------------------------
     # Load test dataset.
     test_dataset_obj = dnnlib.util.construct_class_by_name(**test_dataset_kwargs)  # subclass of training.dataset.Dataset
     test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset_obj, batch_size=batch_gpu, **data_loader_kwargs)
+    # -------------------------------------------------------------------------
 
     img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
 
@@ -193,6 +196,8 @@ def training_loop(
     # )
 
     # -------------------------------------------------------------------------
+    # Replace the interface_kwargs with the following code snippet:
+    # Changes: out_channels=dataset_obj.label_dim
     interface_kwargs = dict(
         img_resolution=img_resolution,
         img_channels=net_input_channels,
@@ -203,6 +208,7 @@ def training_loop(
 
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)  # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
+
     if dist.get_rank() == 0:
         with torch.no_grad():
             images = torch.zeros([batch_gpu, img_channels, net.img_resolution, net.img_resolution], device=device)
@@ -298,7 +304,8 @@ def training_loop(
 
             labels = labels.to(device)
 
-            # Classification
+            # -------------------------------------------------------------------------
+            # Classification.
             with misc.ddp_sync(ddp, sync=False):
                 logits, cls_loss = loss_fn(
                     net=ddp,
@@ -320,6 +327,7 @@ def training_loop(
 
                 cls_loss_scaled = cls_loss.mean() * loss_scaling / batch_gpu_total / batch_mul
                 cls_loss_scaled.backward()
+            # -------------------------------------------------------------------------
 
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 loss = loss_fn(
@@ -332,7 +340,6 @@ def training_loop(
                 )
                 training_stats.report("train/loss", loss)
 
-                # Backward pass for main loss
                 loss_scaled = loss.mean() * loss_scaling / batch_gpu_total / batch_mul
                 loss_scaled.backward()
 
@@ -384,8 +391,8 @@ def training_loop(
         # -------------------------------------------------------------------------
         # Classifier metrics.
         fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
-        fields += [f"cls_acc {cls_acc.item():<5.5f}"]
-        fields += [f"cls_ece {cls_ece.item():<5.5f}"]
+        fields += [f"cls_acc {cls_acc.item():<9.5f}"]
+        fields += [f"cls_ece {cls_ece.item():<9.5f}"]
         # -------------------------------------------------------------------------
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
@@ -429,7 +436,7 @@ def training_loop(
             if stats_jsonl is None:
                 stats_jsonl = open(os.path.join(run_dir, "stats.jsonl"), "at")
             stats_jsonl.write(json.dumps(dict(training_stats.default_collector.as_dict(), timestamp=time.time())) + "\n")
-            stats_jsonl.flush()
+            STATS_JSONL.flush()
         dist.update_progress(cur_nimg // 1000, total_kimg)
 
         # Update state.

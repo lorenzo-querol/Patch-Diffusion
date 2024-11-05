@@ -85,12 +85,22 @@ def parse_int_list(s):
 @click.option("--xflip", help="Enable dataset x-flips", metavar="BOOL", type=bool, default=False, show_default=True)
 @click.option("--implicit_mlp", help="encoding coordbefore sending to the conv", metavar="BOOL", type=bool, default=False, show_default=True)
 
+# Classification-related.
+@click.option(
+    "--eval_every",
+    help="How often to evaluate the model on the test dataset",
+    metavar="TICKS",
+    type=click.IntRange(min=1),
+    default=5,
+    show_default=True,
+)
+
 # Performance-related.
 @click.option("--fp16", help="Enable mixed-precision training", metavar="BOOL", type=bool, default=False, show_default=True)
 @click.option("--ls", help="Loss scaling", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 @click.option("--bench", help="Enable cuDNN benchmarking", metavar="BOOL", type=bool, default=True, show_default=True)
 @click.option("--cache", help="Cache dataset in CPU memory", metavar="BOOL", type=bool, default=True, show_default=True)
-@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=4, show_default=True)
 
 # I/O-related.
 @click.option("--desc", help="String to include in result dir name", metavar="STR", type=str)
