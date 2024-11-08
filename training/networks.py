@@ -451,25 +451,12 @@ class SongUNet(torch.nn.Module):
                         x = torch.cat([x, skips.pop()], dim=1)
                     x = block(x, emb)
 
-            x = silu(self.out_norm(x))  # Apply normalization first
-            x = self.fc(x)  # Pool the features using attention [b, c]
-            logits = torch.nn.functional.linear(x, weight=self.out_conv.weight.reshape(self.out_conv.weight.size(0), -1))  # Project to classes
-            if self.out_conv.bias is not None:
-                logits = logits + self.out_conv.bias
-            return logits
-
-            print("Classifier")
-            print("x shape", x.shape)
             logits = self.out_conv(silu(self.out_norm(x)))
-            print("logits shape", logits.shape)
-            logits = self.fc(logits)
-            print("logits shape", logits.shape)
-            return logits
+
+            return self.fc(logits)
 
         else:
             with torch.enable_grad():
-                x = input_tensor = torch.autograd.Variable(x, requires_grad=True)
-
                 # Mapping.
                 emb = self.map_noise(noise_labels)
                 emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)  # swap sin/cos
@@ -482,6 +469,8 @@ class SongUNet(torch.nn.Module):
                     emb = emb + self.map_augment(augment_labels)
                 emb = silu(self.map_layer0(emb))
                 emb = silu(self.map_layer1(emb))
+
+                x = input_tensor = torch.autograd.Variable(x, requires_grad=True)
 
                 # Encoder.
                 skips = []
@@ -513,19 +502,14 @@ class SongUNet(torch.nn.Module):
                             x = torch.cat([x, skips.pop()], dim=1)
                         x = block(x, emb)
 
-                print("EBM")
-                print("x shape", x.shape)
                 logits = self.out_conv(silu(self.out_norm(x)))
-                print("logits shape", logits.shape)
                 logits_logsumexp = logits.logsumexp(1)
-                print("logits_logsumexp shape", logits_logsumexp.shape)
 
                 if self.training:
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True, retain_graph=True)[0]
                 else:
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
 
-                print("x_prime shape", x_prime.shape)
                 return x_prime * -1
 
 
@@ -662,6 +646,28 @@ class SimpleAttentionPool2d(torch.nn.Module):
         return x[:, :, 0]
 
 
+class SimpleAttentionPool2d(torch.nn.Module):
+    """
+    Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        b, c, *_spatial = x.shape
+        x = x.reshape(b, c, -1)  # NC(HW)
+        x = torch.cat([x.mean(dim=-1, keepdim=True), x], dim=-1)  # NC(HW+1)
+        ch = c
+        q = k = v = x
+        scale = 1 / math.sqrt(math.sqrt(ch))
+        weight = torch.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        x = torch.einsum("bts,bcs->bct", weight, v)
+        x = x.reshape(b, -1, x.shape[-1])
+        return x[:, :, 0]
+
+
 @persistence.persistent_class
 class EBMUNet(torch.nn.Module):
     def __init__(
@@ -739,7 +745,6 @@ class EBMUNet(torch.nn.Module):
     def forward(self, x, noise_labels, class_labels=None, augment_labels=None, cls_mode=False):
         """
         Forward pass with EBM functionality.
-
         Args:
             x: Input tensor
             noise_labels: Timestep embeddings
@@ -748,7 +753,6 @@ class EBMUNet(torch.nn.Module):
             cls_mode: If True, runs in classification mode
             return_logits: If True, returns logits instead of gradients
         """
-
         if cls_mode:
             # Mapping.
             emb = self.map_noise(noise_labels)
@@ -776,10 +780,11 @@ class EBMUNet(torch.nn.Module):
                 x = block(x, emb)
 
             logits = self.out_conv(silu(self.out_norm(x)))
+
             return self.fc(logits)
+
         else:
             with torch.enable_grad():
-                x = input_tensor = torch.autograd.Variable(x, requires_grad=True)
 
                 # Mapping.
                 emb = self.map_noise(noise_labels)
@@ -794,6 +799,8 @@ class EBMUNet(torch.nn.Module):
                     emb = emb + self.map_label(tmp)
                 emb = silu(emb)
 
+                x = input_tensor = torch.autograd.Variable(x, requires_grad=True)
+
                 # Encoder.
                 skips = []
                 for block in self.enc.values():
@@ -805,7 +812,6 @@ class EBMUNet(torch.nn.Module):
                     if x.shape[1] != block.in_channels:
                         x = torch.cat([x, skips.pop()], dim=1)
                     x = block(x, emb)
-
                 logits = self.out_conv(silu(self.out_norm(x)))
 
                 # EBM gradient computation.
@@ -1113,7 +1119,7 @@ class Patch_EDMPrecond(torch.nn.Module):
             img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs
         )
 
-    def forward(self, x, sigma, x_pos=None, class_labels=None, force_fp32=False, **model_kwargs):
+    def forward(self, x, sigma, x_pos=None, class_labels=None, force_fp32=False, cls_mode=False, **model_kwargs):
         x = x.to(torch.float32)
         sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
         class_labels = (
@@ -1133,10 +1139,14 @@ class Patch_EDMPrecond(torch.nn.Module):
         c_noise = sigma.log() / 4
 
         x_in = torch.cat([c_in * x, x_pos], dim=1) if x_pos is not None else c_in * x
-        F_x = self.model((x_in).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
-        F_x = F_x[:, : x.shape[1]]
+        F_x = self.model((x_in).to(dtype), c_noise.flatten(), class_labels=class_labels, cls_mode=cls_mode, **model_kwargs)
+
         assert F_x.dtype == dtype
 
+        if cls_mode:
+            return F_x
+
+        F_x = F_x[:, : x.shape[1]]
         D_x = c_skip * x + c_out * F_x.to(torch.float32)
         return D_x
 

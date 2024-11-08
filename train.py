@@ -52,8 +52,8 @@ def parse_int_list(s):
 
 # Main options.
 @click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
-@click.option("--data", help="Path to the dataset", metavar="ZIP|DIR", type=str, required=True)
-@click.option("--test_data", help="Path to the test dataset", metavar="ZIP|DIR", type=str, required=True)
+@click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
+@click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
 @click.option(
     "--arch",
@@ -100,7 +100,7 @@ def parse_int_list(s):
 @click.option("--ls", help="Loss scaling", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 @click.option("--bench", help="Enable cuDNN benchmarking", metavar="BOOL", type=bool, default=True, show_default=True)
 @click.option("--cache", help="Cache dataset in CPU memory", metavar="BOOL", type=bool, default=True, show_default=True)
-@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=4, show_default=True)
+@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 
 # I/O-related.
 @click.option("--desc", help="String to include in result dir name", metavar="STR", type=str)
@@ -130,12 +130,12 @@ def main(**kwargs):
     # Initialize config dict.
     c = dnnlib.EasyDict()
     c.dataset_kwargs = dnnlib.EasyDict(
-        class_name="training.dataset.ImageFolderDataset", path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
+        class_name="training.dataset.ImageFolderDataset", path=opts.train_dir, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
     )
     # ---------------------
-    # Add test dataset.
-    c.test_dataset_kwargs = dnnlib.EasyDict(
-        class_name="training.dataset.ImageFolderDataset", path=opts.test_data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
+    # Add valid dataset.
+    c.val_dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset", path=opts.val_dir, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
     )
     # ---------------------
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
@@ -170,7 +170,7 @@ def main(**kwargs):
     # ----------------------
     else:
         assert opts.arch == "ebm"
-        c.network_kwargs.update(model_type="EBMUNet", model_channels=192, channel_mult=[1, 2, 3, 4])
+        c.network_kwargs.update(model_type="EBMUNet")
     # ----------------------
 
     # Preconditioning & loss function.

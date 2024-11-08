@@ -15,6 +15,7 @@ import pickle
 import psutil
 import numpy as np
 import torch
+from calibration.ece import ECELoss
 import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import training_stats
@@ -33,62 +34,13 @@ def set_requires_grad(model, value):
 
 
 # ----------------------------------------------------------------------------
-# Expected Calibration Error (ECE) metric for classification task.
 
 
-class ECELoss(nn.Module):
-    """
-    Calculates the Expected Calibration Error of a model.
-    (This isn't necessary for temperature scaling, just a cool metric).
-
-    The input to this loss is the logits of a model, NOT the softmax scores.
-
-    This divides the confidence outputs into equally-sized interval bins.
-    In each bin, we compute the confidence gap:
-
-    bin_gap = | avg_confidence_in_bin - accuracy_in_bin |
-
-    We then return a weighted average of the gaps, based on the number
-    of samples in each bin
-
-    See: Naeini, Mahdi Pakdaman, Gregory F. Cooper, and Milos Hauskrecht.
-    "Obtaining Well Calibrated Probabilities Using Bayesian Binning." AAAI.
-    2015.
-    """
-
-    def __init__(self, n_bins=15):
-        """
-        n_bins (int): number of confidence interval bins
-        """
-        super(ECELoss, self).__init__()
-        bin_boundaries = torch.linspace(0, 1, n_bins + 1)
-        self.bin_lowers = bin_boundaries[:-1]
-        self.bin_uppers = bin_boundaries[1:]
-
-    def forward(self, logits, labels):
-        softmaxes = F.softmax(logits, dim=1)
-        confidences, predictions = torch.max(softmaxes, 1)
-        accuracies = predictions.eq(labels)
-
-        ece = torch.zeros(1, device=logits.device)
-        for bin_lower, bin_upper in zip(self.bin_lowers, self.bin_uppers):
-            # Calculated |confidence - accuracy| in each bin
-            in_bin = confidences.gt(bin_lower.item()) * confidences.le(bin_upper.item())
-            prop_in_bin = in_bin.float().mean()
-
-            if prop_in_bin.item() > 0:
-                accuracy_in_bin = accuracies[in_bin].float().mean()
-                avg_confidence_in_bin = confidences[in_bin].mean()
-                ece += torch.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
-
-        return ece
-
-
-def eval_cls(net, test_dataloader, loss_fn, augment_pipe, device):
+def eval_cls(net, val_dataloader, loss_fn, augment_pipe, device):
     losses, accs, eces = [], [], []
 
     with torch.no_grad():
-        for i, (images, labels) in enumerate(test_dataloader):
+        for i, (images, labels) in enumerate(val_dataloader):
             if i > 10:
                 break
             images = images.to(device).to(torch.float32) / 127.5 - 1
@@ -119,7 +71,7 @@ def eval_cls(net, test_dataloader, loss_fn, augment_pipe, device):
 def training_loop(
     run_dir=".",  # Output directory.
     dataset_kwargs={},  # Options for training set.
-    test_dataset_kwargs={},  # Options for test set. (NEW!!)
+    val_dataset_kwargs={},  # Options for valid set. (NEW!!)
     data_loader_kwargs={},  # Options for torch.utils.data.DataLoader.
     network_kwargs={},  # Options for model and preconditioning.
     loss_kwargs={},  # Options for loss function.
@@ -169,8 +121,8 @@ def training_loop(
 
     # -------------------------------------------------------------------------
     # Load test dataset.
-    test_dataset_obj = dnnlib.util.construct_class_by_name(**test_dataset_kwargs)  # subclass of training.dataset.Dataset
-    test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset_obj, batch_size=batch_gpu, **data_loader_kwargs)
+    val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs)  # subclass of training.dataset.Dataset
+    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **data_loader_kwargs)
     # -------------------------------------------------------------------------
 
     img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
@@ -188,19 +140,13 @@ def training_loop(
     # Construct network.
     dist.print0("Constructing network...")
     net_input_channels = img_channels + 2
-    # interface_kwargs = dict(
-    #     img_resolution=img_resolution,
-    #     img_channels=net_input_channels,
-    #     out_channels=4 if train_on_latents else dataset_obj.num_channels,
-    #     label_dim=dataset_obj.label_dim,
-    # )
-
     # -------------------------------------------------------------------------
-    # Replace the interface_kwargs with the following code snippet:
+    # Replace interface_kwargs with the following code snippet:
     # Changes: out_channels=dataset_obj.label_dim
     interface_kwargs = dict(
         img_resolution=img_resolution,
         img_channels=net_input_channels,
+        # out_channels=4 if train_on_latents else dataset_obj.num_channels,
         out_channels=dataset_obj.label_dim,
         label_dim=dataset_obj.label_dim,
     )
@@ -366,10 +312,10 @@ def training_loop(
             continue
 
         # -------------------------------------------------------------------------
-        # Evaluate on test set.
+        # Evaluate on validation set.
         if cur_tick % 5 == 0:
             ddp.eval()
-            val_loss, val_acc, val_ece = eval_cls(net, test_dataloader, loss_fn, augment_pipe, device)
+            val_loss, val_acc, val_ece = eval_cls(net, val_dataloader, loss_fn, augment_pipe, device)
             training_stats.report("val/loss", val_loss)
             training_stats.report("val/acc", val_acc)
             training_stats.report("val/ece", val_ece)
@@ -388,12 +334,14 @@ def training_loop(
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
         fields += [f"loss {loss.mean().item():<9.5f}"]
+
         # -------------------------------------------------------------------------
-        # Classifier metrics.
+        # Classification statistics.
         fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
         fields += [f"cls_acc {cls_acc.item():<9.5f}"]
         fields += [f"cls_ece {cls_ece.item():<9.5f}"]
         # -------------------------------------------------------------------------
+
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
         fields += [
@@ -436,7 +384,7 @@ def training_loop(
             if stats_jsonl is None:
                 stats_jsonl = open(os.path.join(run_dir, "stats.jsonl"), "at")
             stats_jsonl.write(json.dumps(dict(training_stats.default_collector.as_dict(), timestamp=time.time())) + "\n")
-            STATS_JSONL.flush()
+            stats_jsonl.flush()
         dist.update_progress(cur_nimg // 1000, total_kimg)
 
         # Update state.

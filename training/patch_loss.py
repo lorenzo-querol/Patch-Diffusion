@@ -74,13 +74,12 @@ class Patch_EDMLoss:
         yn = y + n
 
         if cls_mode:
-            logits = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels, cls_mode=cls_mode)
+            logits = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels, cls_mode=True)
             ce_loss = torch.nn.functional.cross_entropy(logits, labels.argmax(dim=1), reduction="none")
             return logits, ce_loss
 
-        D_yn = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels, cls_mode=cls_mode)
+        D_yn = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels)
         loss = weight * ((D_yn - y) ** 2)
-
         return loss
 
 
