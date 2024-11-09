@@ -163,3 +163,4 @@ training-runs
 fid-tmp/*
 wrn-runs
 wrn-test-runs
+data

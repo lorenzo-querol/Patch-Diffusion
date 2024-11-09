@@ -1,18 +1,295 @@
 import csv
-import json
 import os
 import random
-import PIL
-import numpy as np
-import pyspng
-import torch.backends
+import time
 import click
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from calibration.ece import ECELoss
 import dnnlib
+
+
+class BasicBlock(nn.Module):
+    def __init__(self, in_planes, out_planes, stride, dropRate=0.0):
+        super(BasicBlock, self).__init__()
+        self.bn1 = nn.BatchNorm2d(in_planes)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_planes)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.droprate = dropRate
+        self.equalInOut = in_planes == out_planes
+        self.convShortcut = (not self.equalInOut) and nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False) or None
+
+    def forward(self, x):
+        if not self.equalInOut:
+            x = self.relu1(self.bn1(x))
+        else:
+            out = self.relu1(self.bn1(x))
+        if self.equalInOut:
+            out = self.relu2(self.bn2(self.conv1(out)))
+        else:
+            out = self.relu2(self.bn2(self.conv1(x)))
+        if self.droprate > 0:
+            out = F.dropout(out, p=self.droprate, training=self.training)
+        out = self.conv2(out)
+        if not self.equalInOut:
+            return torch.add(self.convShortcut(x), out)
+        else:
+            return torch.add(x, out)
+
+
+class NetworkBlock(nn.Module):
+    def __init__(self, nb_layers, in_planes, out_planes, block, stride, dropRate=0.0):
+        super(NetworkBlock, self).__init__()
+        self.layer = self._make_layer(block, in_planes, out_planes, nb_layers, stride, dropRate)
+
+    def _make_layer(self, block, in_planes, out_planes, nb_layers, stride, dropRate):
+        layers = []
+        for i in range(nb_layers):
+            layers.append(block(i == 0 and in_planes or out_planes, out_planes, i == 0 and stride or 1, dropRate))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layer(x)
+
+
+class WideResNet(nn.Module):
+    def __init__(self, depth=28, widen_factor=10, in_channels=3, num_classes=10, dropRate=0.3):
+        super(WideResNet, self).__init__()
+        nChannels = [16, 16 * widen_factor, 32 * widen_factor, 64 * widen_factor]
+        assert (depth - 4) % 6 == 0
+        n = (depth - 4) // 6
+        block = BasicBlock
+
+        # 1st conv before any network block
+        self.conv1 = nn.Conv2d(in_channels, nChannels[0], kernel_size=3, stride=1, padding=1, bias=False)
+        # 1st block
+        self.block1 = NetworkBlock(n, nChannels[0], nChannels[1], block, 1, dropRate)
+        # 2nd block
+        self.block2 = NetworkBlock(n, nChannels[1], nChannels[2], block, 2, dropRate)
+        # 3rd block
+        self.block3 = NetworkBlock(n, nChannels[2], nChannels[3], block, 2, dropRate)
+        # global average pooling and classifier
+        self.bn1 = nn.BatchNorm2d(nChannels[3])
+        self.relu = nn.ReLU(inplace=True)
+        self.fc = nn.Linear(nChannels[3], num_classes)
+        self.nChannels = nChannels[3]
+
+        # Initialize weights
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                m.bias.data.zero_()
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.block1(out)
+        out = self.block2(out)
+        out = self.block3(out)
+        out = self.relu(self.bn1(out))
+        out = F.avg_pool2d(out, 8)
+        out = out.view(-1, self.nChannels)
+        return self.fc(out)
+
+
 import torch
-import torch.nn.functional as F
-import torchvision as tv
-from training.dataset import Dataset
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+
+class AverageMeter(object):
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, num):
+        self.val = val
+        self.sum += val * num
+        self.count += num
+        self.avg = self.sum / self.count
+
+
+def get_cifar10_loaders(batch_size=128, num_workers=4):
+    transform_train = transforms.Compose(
+        [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ]
+    )
+
+    transform_test = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ]
+    )
+
+    # Load datasets
+    train_set = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=transform_train)
+    test_set = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transform_test)
+
+    # Create data loaders
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+    return {"train": train_loader, "test": test_loader}, 10
+
+
+def train_epoch(epoch, model, train_loader, criterion, optimizer, scheduler, device):
+    model.train()
+
+    acc_meter = AverageMeter()
+    loss_meter = AverageMeter()
+    ece_meter = AverageMeter()
+
+    ece_criterion = ECELoss()
+
+    for inputs, targets in train_loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+
+        _, preds = torch.max(outputs, dim=1)
+
+        loss_ = loss.item()
+        correct_ = preds.eq(targets).sum().item()
+        num = inputs.size(0)
+        ece = ece_criterion(outputs, targets).item()
+
+        accuracy = correct_ / num
+
+        loss_meter.update(loss_, num)
+        acc_meter.update(accuracy, num)
+        ece_meter.update(ece, num)
+
+    scheduler.step()
+
+    return {
+        "loss": loss_meter.avg,
+        "acc": acc_meter.avg,
+        "ece": ece_meter.avg,
+    }
+
+
+def evaluate(model, test_loader, criterion, device):
+    model.eval()
+
+    acc_meter = AverageMeter()
+    loss_meter = AverageMeter()
+    ece_meter = AverageMeter()
+
+    ece_criterion = ECELoss(10)
+
+    with torch.no_grad():
+        for inputs, targets in test_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+
+            _, preds = torch.max(outputs, dim=1)
+
+            loss_ = loss.item()
+            correct_ = preds.eq(targets).sum().item()
+            num = inputs.size(0)
+            ece = ece_criterion(outputs, targets).item()
+
+            accuracy = correct_ / num
+
+            loss_meter.update(loss_, num)
+            acc_meter.update(accuracy, num)
+            ece_meter.update(ece, num)
+
+    return {
+        "loss": loss_meter.avg,
+        "acc": acc_meter.avg,
+        "ece": ece_meter.avg,
+    }
+
+
+def train_model(model, train_loader, test_loader, num_epochs=200, run_dir="wrn-runs", snapshot_freq=10):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+
+    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    logger = dnnlib.util.Logger(file_name=os.path.join(run_dir, "log.txt"), file_mode="a", should_flush=True)
+    metrics_file = os.path.join(run_dir, "metrics.csv")
+    with open(metrics_file, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=["epoch", "train_loss", "train_acc", "train_ece", "test_loss", "test_acc", "test_ece"])
+        writer.writeheader()
+
+    for epoch in range(1, num_epochs + 1):
+        time_start = time.time()
+        train_metrics = train_epoch(epoch, model, train_loader, criterion, optimizer, scheduler, device)
+        elapsed = time.time() - time_start
+        test_metrics = evaluate(model, test_loader, criterion, device)
+
+        logger.write(
+            f"Epoch {epoch}/{num_epochs} done in {elapsed:.0f}s\t"
+            f"Train loss: {train_metrics['loss']:.4f}, acc: {train_metrics['acc']:.4f}, ECE: {train_metrics['ece']:.4f}\t\t"
+            f"Test loss: {test_metrics['loss']:.4f}, acc: {test_metrics['acc']:.4f}, ECE: {test_metrics['ece']:.4f}\n"
+        )
+
+        with open(metrics_file, "a", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=["epoch", "train_loss", "train_acc", "train_ece", "test_loss", "test_acc", "test_ece"])
+            writer.writerow(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_metrics["loss"],
+                    "train_acc": train_metrics["acc"],
+                    "train_ece": train_metrics["ece"],
+                    "test_loss": test_metrics["loss"],
+                    "test_acc": test_metrics["acc"],
+                    "test_ece": test_metrics["ece"],
+                }
+            )
+
+        if epoch % snapshot_freq == 0:
+            torch.save(model.state_dict(), os.path.join(run_dir, f"network-snapshot-{epoch}.pt"))
+
+
+def get_next_run_dir(base_dir, desc="run"):
+    # If directory doesn't exist, start with run 0
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Get all numeric prefixes of existing directories
+    existing_runs = [int(d[:5]) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and d[:5].isdigit()]
+
+    # Get next run number
+    next_run = max(existing_runs, default=-1) + 1
+
+    # Create directory
+    name = f"{next_run:05d}-{desc}"
+    os.makedirs(os.path.join(base_dir, name), exist_ok=False)
+
+    return os.path.join(base_dir, name)
 
 
 def init_environment(seed):
@@ -26,314 +303,60 @@ def init_environment(seed):
     torch.backends.cudnn.benchmark = True
 
 
-def process_batch(net, optim, dataloader, device, training=False):
-    total_loss = 0
-    total_correct = 0
-    total_ece = 0
-    total_samples = 0
-
-    ece_criterion = ECELoss(n_bins=20)
-
-    net.train(training)
-
-    with torch.enable_grad() if training else torch.no_grad():
-        for images, labels in dataloader:
-            images, labels = images.to(device), labels.to(device)
-
-            logits = net(images)
-            loss = F.cross_entropy(logits, labels)
-            ece = ece_criterion(logits, labels.argmax(1))
-
-            if training:
-                optim.zero_grad(set_to_none=True)
-                loss.backward()
-                optim.step()
-
-            total_loss += loss.item() * images.size(0)
-            total_correct += (logits.argmax(1) == labels.argmax(1)).sum().item()
-            total_ece += ece.item() * images.size(0)
-            total_samples += images.size(0)
-
-    metrics = {"loss": total_loss / total_samples, "acc": total_correct / total_samples, "ece": total_ece / total_samples}
-    return metrics
-
-
-def get_next_run_dir(base_dir, desc="wrn_run"):
-    # If directory doesn't exist, start with run 0
-    os.makedirs(base_dir, exist_ok=True)
-
-    # Get all numeric prefixes of existing directories
-    existing_runs = [int(d[:5]) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and d[:5].isdigit()]
-
-    # Get next run number
-    next_run = max(existing_runs, default=-1) + 1
-    return os.path.join(base_dir, f"{next_run:05d}-{desc}")
-
-
-class WRNDataset(Dataset):
-    def __init__(
-        self,
-        path,  # Path to directory or zip.
-        resolution=None,  # Ensure specific resolution, None = highest available.
-        use_pyspng=True,  # Use pyspng if available?
-        transforms=None,  # Optional image transform.
-        **super_kwargs,  # Additional arguments for the Dataset base class.
-    ):
-        self._path = path
-        self._use_pyspng = use_pyspng
-        self._zipfile = None
-        self.transforms = transforms
-
-        if os.path.isdir(self._path):
-            self._type = "dir"
-            self._all_fnames = {
-                os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files
-            }
-        else:
-            raise IOError("Path must point to a directory or zip")
-
-        PIL.Image.init()
-        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
-        if len(self._image_fnames) == 0:
-            raise IOError("No image files found in the specified path")
-
-        name = os.path.splitext(os.path.basename(self._path))[0]
-        raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
-        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
-            raise IOError("Image files do not match the specified resolution")
-        super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
-
-    @staticmethod
-    def _file_ext(fname):
-        return os.path.splitext(fname)[1].lower()
-
-    def _open_file(self, fname):
-        return open(os.path.join(self._path, fname), "rb")
-
-    def __getstate__(self):
-        return dict(super().__getstate__(), _zipfile=None)
-
-    def _load_raw_image(self, raw_idx):
-        fname = self._image_fnames[raw_idx]
-        with self._open_file(fname) as f:
-            if self._use_pyspng and pyspng is not None and self._file_ext(fname) == ".png":
-                image = pyspng.load(f.read())
-            else:
-                image = np.array(PIL.Image.open(f))
-        if image.ndim == 2:
-            image = image[:, :, np.newaxis]  # HW => HWC
-        image = image.transpose(2, 0, 1)  # HWC => CHW
-        return image
-
-    def _load_raw_labels(self):
-        fname = "dataset.json"
-        if fname not in self._all_fnames:
-            return None
-
-        with self._open_file(fname) as f:
-            labels = json.load(f)["labels"]
-
-        if labels is None:
-            return None
-
-        labels = dict(labels)
-        labels = [labels[fname.replace("\\", "/")] for fname in self._image_fnames]
-        labels = np.array(labels)
-        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
-
-        return labels
-
-    def __getitem__(self, idx):
-        raw_idx = self._raw_idx[idx]
-        image = self._cached_images.get(raw_idx, None)
-
-        if image is None:
-            image = self._load_raw_image(raw_idx)
-            if self._cache:
-                self._cached_images[raw_idx] = image
-
-        assert isinstance(image, np.ndarray)
-        assert list(image.shape) == self.image_shape
-        assert image.dtype == np.uint8
-
-        if self.transforms is not None:
-            image = PIL.Image.fromarray(image.transpose(1, 2, 0))  # CHW -> HWC
-            image = self.transforms(image)
-
-        return image, self.get_label(idx)
-
-
-mean = {
-    "cifar10": (0.4914, 0.4822, 0.4465),
-    "cifar100": (0.5071, 0.4867, 0.4408),
-}
-
-std = {
-    "cifar10": (0.2023, 0.1994, 0.2010),
-    "cifar100": (0.2675, 0.2565, 0.2761),
-}
-
-
 @click.command()
-@click.option("--dataset", help="Dataset to use", metavar="STR", required=True)
-@click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
-@click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
-@click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
-@click.option("--test", help="Test the model", is_flag=True)
-@click.option("--test_dir", help="Path to the test dataset", metavar="ZIP|DIR", type=str)
-@click.option("--network_path", help="Path to the network", metavar="STR", type=str)
+@click.option("--batch_size", default=128, help="Batch size")
+@click.option("--num_epochs", default=200, help="Number of epochs")
+@click.option("--run_dir", default="wrn-runs", help="Directory to save run metrics")
+@click.option("--seed", default=None, help="Seed for reproducibility")
+@click.option("--snapshot_freq", default=10, help="Frequency of saving network")
+@click.option("--test", is_flag=True, help="Run in test mode")
+@click.option("--network_path", default=None, help="Path to network snapshot")
+@click.option("--test_dir", default="test-wrn-runs", help="Directory to save test metrics")
 
-# WRN-related.
-@click.option("--num_epochs", help="Number of epochs", metavar="INT", type=int, required=True, default=200)
-@click.option("--batch", help="Total batch size", metavar="INT", type=click.IntRange(min=1), required=True, default=128)
-@click.option("--lr", help="Learning rate", metavar="FLOAT", type=float, required=True, default=0.1)
-@click.option("--depth", help="Depth of the network", metavar="INT", type=int, default=28)
-@click.option("--width", help="Width of the network", metavar="INT", type=int, default=10)
-@click.option("--norm", help="Normalization layer", metavar="STR", type=str, default="batch")
-@click.option("--dropout", help="Dropout rate", metavar="FLOAT", type=float, default=0.3)
-
-# Evaluation-related.
-@click.option("--eval_every", help="How often to evaluate the model", metavar="INT", type=click.IntRange(min=1), default=5, show_default=True)
-
-# I/O-related.
-@click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int)
-@click.option("--snap", help="How often to save snapshots", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
-@click.option("--workers", help="Number of data loading workers", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
+# WRN-related
+@click.option("--depth", default=28, help="Depth of WideResNet")
+@click.option("--widen_factor", default=10, help="Widen factor of WideResNet")
 def main(**kwargs):
+    args = dnnlib.EasyDict(kwargs)
+    init_environment(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    opts = dnnlib.EasyDict(kwargs)
 
-    init_environment(opts.seed)
+    loaders, num_classes = get_cifar10_loaders(batch_size=args.batch_size)
+    model = WideResNet(depth=args.depth, widen_factor=args.widen_factor, num_classes=num_classes)
 
-    # Create numbered run directory
-    run_dir = get_next_run_dir(opts.outdir)
-    os.makedirs(run_dir, exist_ok=False)  # Will raise error if dir exists
+    if args.test:
+        assert args.network_path is not None, "Please provide a network path for testing"
 
-    # Initialize config dict.
-    c = dnnlib.EasyDict()
+        model.load_state_dict(torch.load(args.network_path))
+        model = model.to(device)
 
-    print(f"Starting run in {run_dir}")
-    print("Loading dataset...")
+        test_loader = loaders["test"]
+        criterion = nn.CrossEntropyLoss()
 
-    dataset_kwargs = dnnlib.EasyDict(class_name="train_wrn.WRNDataset", path=opts.train_dir, use_labels=True)
-    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
-    resolution = dataset_obj.resolution
-    del dataset_obj, dataset_kwargs
+        test_metrics = evaluate(model, test_loader, criterion, device)
 
-    transforms = {
-        "train": tv.transforms.Compose(
-            [
-                tv.transforms.RandomCrop(resolution, padding=4),
-                tv.transforms.RandomHorizontalFlip(),
-                tv.transforms.ToTensor(),
-                tv.transforms.Normalize(mean[opts.dataset], std[opts.dataset]),
-            ]
-        ),
-        "test": tv.transforms.Compose(
-            [
-                tv.transforms.ToTensor(),
-                tv.transforms.Normalize(mean[opts.dataset], std[opts.dataset]),
-            ]
-        ),
-    }
+        run_name = os.path.dirname(args.network_path).split("/")[-1]
+        os.makedirs(args.test_dir, exist_ok=True)
 
-    c.dataset_kwargs = dnnlib.EasyDict(class_name="train_wrn.WRNDataset", path=opts.train_dir, use_labels=True, transforms=transforms["train"])
-    c.val_dataset_kwargs = dnnlib.EasyDict(class_name="train_wrn.WRNDataset", path=opts.val_dir, use_labels=True, transforms=transforms["test"])
-    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
+        with open(os.path.join(args.test_dir, f"{run_name}.csv"), "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=["loss", "acc", "ece"])
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "loss": test_metrics["loss"],
+                    "acc": test_metrics["acc"],
+                    "ece": test_metrics["ece"],
+                }
+            )
 
-    # Create dataloaders.
-    dataset_obj = dnnlib.util.construct_class_by_name(**c.dataset_kwargs)
-    val_dataset_obj = dnnlib.util.construct_class_by_name(**c.val_dataset_kwargs)
-    train_dataloader = torch.utils.data.DataLoader(dataset=dataset_obj, batch_size=opts.batch, **c.data_loader_kwargs)
-    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=opts.batch, **c.data_loader_kwargs)
-
-    img_channels, num_classes = dataset_obj.num_channels, dataset_obj.label_dim
-
-    # Initialize network and optimizer.
-    print("Loading network...")
-    c.network_kwargs = dnnlib.EasyDict(
-        class_name="baseline_models.wide_resnet.Wide_ResNet",
-        depth=opts.depth,
-        widen_factor=opts.width,
-        in_channels=img_channels,
-        num_classes=num_classes,
-        dropout_rate=opts.dropout,
-        norm=opts.norm,
-    )
-    c.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.SGD", lr=opts.lr, momentum=0.9, weight_decay=5e-4)
-    net = dnnlib.util.construct_class_by_name(**c.network_kwargs).to(device)
-    optim = dnnlib.util.construct_class_by_name(**c.optimizer_kwargs, params=net.parameters())
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optim, milestones=[60, 120, 160], gamma=0.2)
-
-    # Create output directory.
-    print("Creating output directory...")
-
-    # remove transforms from c dataset kwargs
-    c.dataset_kwargs.pop("transforms")
-    c.val_dataset_kwargs.pop("transforms")
-
-    logger = dnnlib.util.Logger(file_name=os.path.join(run_dir, "log.txt"), file_mode="a", should_flush=True)
-    with open(os.path.join(run_dir, "training_options.json"), "wt") as f:
-        json.dump(c, f, indent=2)
-
-    metrics_file = os.path.join(run_dir, "metrics.csv")
-    with open(metrics_file, "w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=["epoch", "train_loss", "train_acc", "train_ece", "val_loss", "val_acc", "val_ece"])
-        writer.writeheader()
-
-    if opts.test:
-        assert opts.test_dir is not None, "Must provide a test directory for testing"
-        assert opts.network_path is not None, "Must provide a network path for testing"
-
-        c.test_dataset_kwargs = dnnlib.EasyDict(class_name="train_wrn.WRNDataset", path=opts.test_dir, use_labels=True, transforms=transforms["test"])
-        test_dataset_obj = dnnlib.util.construct_class_by_name(**c.test_dataset_kwargs)
-        test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset_obj, batch_size=opts.batch, **c.data_loader_kwargs)
-
-        print("Testing...")
-        net.load_state_dict(torch.load(opts.network_path)["model_state_dict"])
-        test_metrics = process_batch(net, optim, test_dataloader, device)
-        test_str = f"Test Loss: {test_metrics['loss']:.4f} | Test Acc: {test_metrics['acc']:.4f} | Test ECE: {test_metrics['ece']:.4f}\n"
-        print(test_str)
         return
 
-    print("Training...")
-    for epoch in range(opts.num_epochs):
-        train_metrics = process_batch(net, optim, train_dataloader, device, training=True)
-        train_str = f"Epoch {epoch+1} | Loss: {train_metrics['loss']:.4f} | Acc: {train_metrics['acc']:.4f} | ECE: {train_metrics['ece']:.4f}\n"
-        logger.write(train_str)
-
-        if epoch % opts.eval_every == 0:
-            val_metrics = process_batch(net, optim, val_dataloader, device)
-            val_str = f"Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['acc']:.4f} | Val ECE: {val_metrics['ece']:.4f}\n"
-            logger.write(val_str)
-
-        if epoch % opts.snap == 0:
-            dict_values = {"model_state_dict": net.state_dict(), "optim_state_dict": optim.state_dict()}
-            torch.save(dict_values, os.path.join(run_dir, f"network-snapshot-epoch-{epoch}.pt"))
-
-        with open(metrics_file, "a", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=["epoch", "train_loss", "train_acc", "train_ece", "val_loss", "val_acc", "val_ece"])
-            epoch_metrics = {
-                "epoch": epoch,
-                "train_loss": train_metrics["loss"],
-                "train_acc": train_metrics["acc"],
-                "train_ece": train_metrics["ece"],
-                "val_loss": val_metrics["loss"],
-                "val_acc": val_metrics["acc"],
-                "val_ece": val_metrics["ece"],
-            }
-            writer.writerow(epoch_metrics)
-
-        scheduler.step()
-
-    torch.save(
-        {
-            "model_state_dict": net.state_dict(),
-            "optim_state_dict": optim.state_dict(),
-        },
-        os.path.join(run_dir, "network-final.pt"),
-    )
+    run_dir = get_next_run_dir(args.run_dir)
+    train_model(model, loaders["train"], loaders["test"], num_epochs=args.num_epochs, run_dir=run_dir, snapshot_freq=args.snapshot_freq)
 
 
 if __name__ == "__main__":
+    """
+    python train_wrn.py --test --network_path wrn-runs/00003-run/network-snapshot-200.pt
+    """
     main()

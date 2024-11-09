@@ -41,8 +41,6 @@ def eval_cls(net, val_dataloader, loss_fn, augment_pipe, device):
 
     with torch.no_grad():
         for i, (images, labels) in enumerate(val_dataloader):
-            if i > 10:
-                break
             images = images.to(device).to(torch.float32) / 127.5 - 1
             labels = labels.to(device)
 
@@ -263,8 +261,7 @@ def training_loop(
                     cls_mode=True,
                 )
                 cls_loss = 0.001 * cls_loss
-
-                cls_ece = ECELoss()(logits, labels.argmax(dim=1))
+                cls_ece = ECELoss(10)(logits, labels.argmax(dim=1))
                 cls_acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
 
                 training_stats.report("train/cls_acc", cls_acc)

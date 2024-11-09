@@ -47,15 +47,15 @@ python dataset_tool.py --dataset cifar10 --dest ../data/cifar10 --transform cent
 You can train new models using `train.py`. For example:
 
 ```.bash
-
 torchrun --standalone --nproc_per_node=2 train.py \
     --outdir=training-runs \
-    --train_dir=../data/cifar10/train.zip \
-    --val_dir=../data/cifar10/valid.zip \
+    --train_dir=../data/cifar10/train \
+    --val_dir=../data/cifar10/test \
     --cond=1 \
     --arch=ebm \
     --batch=128 \
-    --cres=1,2,2,2 \
+    --cbase=192 \
+    --cres=1,2,2 \
     --lr=2e-4 \
     --dropout=0.0 \
     --augment=0.0 \
@@ -73,7 +73,7 @@ CUDA_VISIBLE_DEVICES=1 python train_wrn.py \
     --val_dir=../data/cifar10/test \
     --batch=128 \
     --norm=batch \
-    --eval_every=1 \
+    --eval_every=10 \
     --seed=1
 ```
 To test the performance of the WRN model, you can use the following command:

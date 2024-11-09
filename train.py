@@ -107,7 +107,7 @@ def parse_int_list(s):
 @click.option("--nosubdir", help="Do not create a subdirectory for results", is_flag=True)
 @click.option("--tick", help="How often to print progress", metavar="KIMG", type=click.IntRange(min=1), default=50, show_default=True)
 @click.option("--snap", help="How often to save snapshots", metavar="TICKS", type=click.IntRange(min=1), default=50, show_default=True)
-@click.option("--dump", help="How often to dump state", metavar="TICKS", type=click.IntRange(min=1), default=500, show_default=True)
+@click.option("--dump", help="How often to dump state", metavar="TICKS", type=click.IntRange(min=1), default=50, show_default=True)
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int)
 @click.option("--transfer", help="Transfer learning from network pickle", metavar="PKL|URL", type=str)
 @click.option("--resume", help="Resume from previous training state", metavar="PT", type=str)
