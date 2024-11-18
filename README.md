@@ -38,7 +38,7 @@ python dataset_tool.py --source=../cifar-10-python.tar.gz --dest ../data/cifar10
 
 python dataset_tool.py --source=../cifar-10-python.tar.gz --dest ../data/cifar10/test --transform center-crop --resolution 32x32 --is_test
 
-python dataset_tool.py --dataset cifar10 --dest ../data/cifar10 --transform center-crop --resolution 32x32 --val_ratio 0.0
+python dataset_tool.py --dataset cifar10 --dest data/cifar100 --transform center-crop --resolution 32x32 --val_ratio 0.2
 
 ```
 
@@ -49,13 +49,13 @@ You can train new models using `train.py`. For example:
 ```.bash
 torchrun --standalone --nproc_per_node=2 train.py \
     --outdir=training-runs \
-    --train_dir=../data/cifar10/train \
-    --val_dir=../data/cifar10/test \
+    --train_dir=data/cifar100/train \
+    --val_dir=data/cifar100/valid \
     --cond=1 \
     --arch=ebm \
-    --batch=128 \
-    --cbase=192 \
     --cres=1,2,2 \
+    --attn_resolutions=16,8 \
+    --batch=128 \
     --lr=2e-4 \
     --dropout=0.0 \
     --augment=0.0 \
@@ -108,7 +108,7 @@ torchrun --standalone --nproc_per_node=8 generate.py --steps=50 --resolution 64 
 torchrun --standalone --nproc_per_node=8 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --on_latents=1 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=/path-to-the-pkl/
 
 # CUSTOM For ADM Architecture we use
-torchrun --standalone --nproc_per_node=1 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=training-runs/00000-train-cond-ebm-pedm-gpus2-batch128-fp32/network-snapshot-015072.pkl --cfg=1.3
+torchrun --standalone --nproc_per_node=2 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=training-runs/00000-train-cond-ebm-pedm-gpus2-batch128-fp32/network-snapshot-007536.pkl --cfg=1.3
 ```
 
 We share our pretrained model checkpoints at [Huggingface Page](https://huggingface.co/zhendongw/patch-diffusion/tree/main). For ImageNet dataset, to generate with classifier-free-guidance, please add `--cfg=1.3` to the command. 
@@ -119,8 +119,12 @@ To compute Fr&eacute;chet inception distance (FID) for a given model and sampler
 
 ```.bash
 # Generate 50000 images and save them as fid-tmp/*/*.png
+<!-- torchrun --standalone --nproc_per_node=1 generate.py --outdir=fid-tmp --seeds=0-49999 --subdirs \
+    --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl -->
+
 torchrun --standalone --nproc_per_node=1 generate.py --outdir=fid-tmp --seeds=0-49999 --subdirs \
-    --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
+    --network=training-runs/00000-train-cond-ebm-pedm-gpus2-batch128-fp32/network-snapshot-007536.pkl --cfg=1.0
+
 
 # Calculate FID
 torchrun --standalone --nproc_per_node=1 fid.py calc --images=fid-tmp \

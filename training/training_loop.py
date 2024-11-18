@@ -7,25 +7,20 @@
 
 """Main training loop."""
 
-import os
-import time
 import copy
 import json
+import os
 import pickle
-import psutil
+import time
+
 import numpy as np
 import torch
-from calibration.ece import ECELoss
-import dnnlib
-from torch_utils import distributed as dist
-from torch_utils import training_stats
-from torch_utils import misc
-
 from diffusers import AutoencoderKL
 
-import torch.nn as nn
-import torch
-import torch.nn.functional as F
+import dnnlib
+from calibration.ece import ECELoss
+from torch_utils import distributed as dist
+from torch_utils import misc, training_stats
 
 
 def set_requires_grad(model, value):
@@ -33,10 +28,7 @@ def set_requires_grad(model, value):
         param.requires_grad = value
 
 
-# ----------------------------------------------------------------------------
-
-
-def eval_cls(net, val_dataloader, loss_fn, augment_pipe, device):
+def eval_cls(net, val_dataloader, loss_fn, device):
     losses, accs, eces = [], [], []
 
     with torch.no_grad():
@@ -48,11 +40,11 @@ def eval_cls(net, val_dataloader, loss_fn, augment_pipe, device):
                 net=net,
                 images=images,
                 patch_size=images.shape[-1],
-                resolution=images.shape[-1],
                 labels=labels,
-                augment_pipe=augment_pipe,
                 cls_mode=True,
+                eval_mode=True,
             )
+
             acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
             ece = ECELoss()(logits, labels.argmax(dim=1))
 
@@ -63,7 +55,13 @@ def eval_cls(net, val_dataloader, loss_fn, augment_pipe, device):
     return np.mean(losses), np.mean(accs), np.mean(eces)
 
 
-# ----------------------------------------------------------------------------
+def initialize(seed: int, cudnn_benchmark: bool):
+    np.random.seed((seed * dist.get_world_size() + dist.get_rank()) % (1 << 31))
+    torch.manual_seed(np.random.randint(1 << 31))
+    torch.backends.cudnn.benchmark = cudnn_benchmark
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
 
 
 def training_loop(
@@ -97,18 +95,15 @@ def training_loop(
 ):
     # Initialize.
     start_time = time.time()
-    np.random.seed((seed * dist.get_world_size() + dist.get_rank()) % (1 << 31))
-    torch.manual_seed(np.random.randint(1 << 31))
-    torch.backends.cudnn.benchmark = cudnn_benchmark
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    initialize(seed, cudnn_benchmark)
 
     # Select batch size per GPU.
     batch_gpu_total = batch_size // dist.get_world_size()
     if batch_gpu is None or batch_gpu > batch_gpu_total:
         batch_gpu = batch_gpu_total
+
     num_accumulation_rounds = batch_gpu_total // batch_gpu
+
     assert batch_size == batch_gpu * num_accumulation_rounds * dist.get_world_size()
 
     # Load dataset.
@@ -117,16 +112,12 @@ def training_loop(
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **data_loader_kwargs))
 
-    # -------------------------------------------------------------------------
-    # Load test dataset.
     val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs)  # subclass of training.dataset.Dataset
     val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **data_loader_kwargs)
-    # -------------------------------------------------------------------------
 
     img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
 
     if train_on_latents:
-        # img_vae = AutoencoderKL.from_pretrained("stabilityai/stable-diffusion-2", subfolder="vae").to(device)
         img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
         img_vae.eval()
         set_requires_grad(img_vae, False)
@@ -138,17 +129,12 @@ def training_loop(
     # Construct network.
     dist.print0("Constructing network...")
     net_input_channels = img_channels + 2
-    # -------------------------------------------------------------------------
-    # Replace interface_kwargs with the following code snippet:
-    # Changes: out_channels=dataset_obj.label_dim
     interface_kwargs = dict(
         img_resolution=img_resolution,
         img_channels=net_input_channels,
-        # out_channels=4 if train_on_latents else dataset_obj.num_channels,
         out_channels=dataset_obj.label_dim,
         label_dim=dataset_obj.label_dim,
     )
-    # -------------------------------------------------------------------------
 
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)  # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
@@ -164,6 +150,7 @@ def training_loop(
     # Setup optimizer.
     dist.print0("Setting up optimizer...")
     loss_fn = dnnlib.util.construct_class_by_name(**loss_kwargs)  # training.loss.(VP|VE|EDM)Loss
+    ece_fn = ECELoss()
     optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs)  # subclass of torch.optim.Optimizer
     augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None  # training.augment.AugmentPipe
     ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
@@ -195,27 +182,20 @@ def training_loop(
     cur_tick = 0
     tick_start_nimg = cur_nimg
     tick_start_time = time.time()
-    maintenance_time = tick_start_time - start_time
     dist.update_progress(cur_nimg // 1000, total_kimg)
     stats_jsonl = None
 
-    # -------------------------------------------------------------------------
-    # NOTE: For datasets like CIFAR, only use two patch sizes: full image (32x32) and half size (16x16)
-
     is_smaller_than_64 = img_resolution == 32
     if is_smaller_than_64:
-        batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for CIFAR
+        batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
         if real_p < 1.0:
             p_list = np.array([(1 - real_p), real_p])
-            patch_list = np.array([16, 32])  # Only two patch sizes for CIFAR
+            patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
             batch_mul_avg = np.sum(p_list * np.array([4, 1]))
         else:
-            p_list = np.array([0, 1.0])  # Always use full resolution when real_p = 1.0
+            p_list = np.array([0, 1.0])
             patch_list = np.array([16, 32])
             batch_mul_avg = 1
-
-    # -------------------------------------------------------------------------
-
     else:
         batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
         if train_on_latents:
@@ -228,16 +208,17 @@ def training_loop(
             batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
 
     while True:
-
         # Accumulate gradients.
         optimizer.zero_grad(set_to_none=True)
         for round_idx in range(num_accumulation_rounds):
             patch_size = int(np.random.choice(patch_list, p=p_list))
             batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
             images, labels = [], []
+
             for _ in range(batch_mul):
                 images_, labels_ = next(dataset_iterator)
                 images.append(images_), labels.append(labels_)
+
             images, labels = torch.cat(images, dim=0), torch.cat(labels, dim=0)
             images = images.to(device).to(torch.float32) / 127.5 - 1
 
@@ -248,56 +229,38 @@ def training_loop(
 
             labels = labels.to(device)
 
-            # -------------------------------------------------------------------------
-            # Classification.
             with misc.ddp_sync(ddp, sync=False):
-                logits, cls_loss = loss_fn(
-                    net=ddp,
-                    images=images,
-                    patch_size=patch_size,
-                    resolution=img_resolution,
-                    labels=labels,
-                    augment_pipe=augment_pipe,
-                    cls_mode=True,
-                )
-                cls_loss = 0.001 * cls_loss
-                cls_ece = ECELoss(10)(logits, labels.argmax(dim=1))
-                cls_acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
+                ce_loss, cls_acc, cls_ece = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe, cls_mode=True)
+                CE_WEIGHT = 1.0
+                cls_loss = CE_WEIGHT * ce_loss.mean()
 
                 training_stats.report("train/cls_acc", cls_acc)
-                training_stats.report("train/cls_loss", cls_loss)
+                training_stats.report("train/cls_loss", cls_loss.mean())
                 training_stats.report("train/cls_ece", cls_ece)
 
-                cls_loss_scaled = cls_loss.mean() * loss_scaling / batch_gpu_total / batch_mul
-                cls_loss_scaled.backward()
-            # -------------------------------------------------------------------------
+                cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
 
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
-                loss = loss_fn(
-                    net=ddp,
-                    images=images,
-                    patch_size=patch_size,
-                    resolution=img_resolution,
-                    labels=labels,
-                    augment_pipe=augment_pipe,
-                )
-                training_stats.report("train/loss", loss)
+                loss = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe)
+                training_stats.report("train/sm_loss", loss)
 
-                loss_scaled = loss.mean() * loss_scaling / batch_gpu_total / batch_mul
-                loss_scaled.backward()
+                loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
 
         # Update weights.
         for g in optimizer.param_groups:
             g["lr"] = optimizer_kwargs["lr"] * min(cur_nimg / max(lr_rampup_kimg * 1000, 1e-8), 1)
+
         for param in net.parameters():
             if param.grad is not None:
                 torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
+
         optimizer.step()
 
         # Update EMA.
         ema_halflife_nimg = ema_halflife_kimg * 1000
         if ema_rampup_ratio is not None:
             ema_halflife_nimg = min(ema_halflife_nimg, cur_nimg * ema_rampup_ratio)
+
         ema_beta = 0.5 ** (batch_size * batch_mul_avg / max(ema_halflife_nimg, 1e-8))
         for p_ema, p_net in zip(ema.parameters(), net.parameters()):
             p_ema.copy_(p_net.detach().lerp(p_ema, ema_beta))
@@ -305,49 +268,34 @@ def training_loop(
         # Perform maintenance tasks once per tick.
         cur_nimg += int(batch_size * batch_mul_avg)
         done = cur_nimg >= total_kimg * 1000
+
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
             continue
 
-        # -------------------------------------------------------------------------
-        # Evaluate on validation set.
+        # Evaluate validation set.
         if cur_tick % 5 == 0:
             ddp.eval()
-            val_loss, val_acc, val_ece = eval_cls(net, val_dataloader, loss_fn, augment_pipe, device)
-            training_stats.report("val/loss", val_loss)
-            training_stats.report("val/acc", val_acc)
-            training_stats.report("val/ece", val_ece)
+            val_loss, val_acc, val_ece = eval_cls(net, val_dataloader, loss_fn, device)
             ddp.train()
 
             fields = []
-            fields += [f"val_loss {val_loss:<9.5f}"]
-            fields += [f"val_acc {val_acc:<5.5f}"]
-            fields += [f"val_ece {val_ece:<5.5f}"]
+            fields += [f"val_loss {training_stats.report0('val/cls_loss', val_loss):<9.5f}"]
+            fields += [f"val_acc {training_stats.report0('val/cls_acc', val_acc):<5.5f}"]
+            fields += [f"val_ece {training_stats.report0('val/cls_ece', val_ece):<5.5f}"]
             dist.print0(" ".join(fields))
-        # -------------------------------------------------------------------------
 
         # Print status line, accumulating the same information in training_stats.
         tick_end_time = time.time()
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
-        fields += [f"loss {loss.mean().item():<9.5f}"]
-
-        # -------------------------------------------------------------------------
-        # Classification statistics.
+        fields += [f"sm_loss {loss.mean().item():<9.5f}"]
         fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
-        fields += [f"cls_acc {cls_acc.item():<9.5f}"]
-        fields += [f"cls_ece {cls_ece.item():<9.5f}"]
-        # -------------------------------------------------------------------------
+        fields += [f"cls_acc {cls_acc.item():<5.5f}"]
+        fields += [f"cls_ece {cls_ece.item():<5.5f}"]
 
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
-        fields += [
-            f"sec/kimg {training_stats.report0('Timing/sec_per_kimg', (tick_end_time - tick_start_time) / (cur_nimg - tick_start_nimg) * 1e3):<7.2f}"
-        ]
-        fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
-        fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
-        fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
-        fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         dist.print0(" ".join(fields))
 
@@ -388,7 +336,7 @@ def training_loop(
         cur_tick += 1
         tick_start_nimg = cur_nimg
         tick_start_time = time.time()
-        maintenance_time = tick_start_time - tick_end_time
+
         if done:
             break
 

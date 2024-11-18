@@ -8,16 +8,17 @@
 """Train diffusion-based generative model using the techniques described in the
 paper "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
+import json
 import os
 import re
-import json
+import warnings
+
 import click
 import torch
+
 import dnnlib
 from torch_utils import distributed as dist
 from training import training_loop
-
-import warnings
 
 warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.
 
@@ -44,17 +45,55 @@ def parse_int_list(s):
 
 
 @click.command()
-
 # Patch options
-@click.option("--real_p", help="Full size image ratio", metavar="INT", type=click.FloatRange(min=0, max=1), default=0.5, show_default=True)
-@click.option("--train_on_latents", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
-@click.option("--progressive", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
-
+@click.option(
+    "--real_p",
+    help="Full size image ratio",
+    metavar="INT",
+    type=click.FloatRange(min=0, max=1),
+    default=0.5,
+    show_default=True,
+)
+@click.option(
+    "--train_on_latents",
+    help="Training on latent embeddings",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
+@click.option(
+    "--progressive",
+    help="Training on latent embeddings",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
 # Main options.
 @click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
-@click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
-@click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
-@click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option(
+    "--train_dir",
+    help="Path to the train dataset",
+    metavar="ZIP|DIR",
+    type=str,
+    required=True,
+)
+@click.option(
+    "--val_dir",
+    help="Path to the valid dataset",
+    metavar="ZIP|DIR",
+    type=str,
+    required=True,
+)
+@click.option(
+    "--cond",
+    help="Train class-conditional model",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
 @click.option(
     "--arch",
     help="Network architecture",
@@ -71,20 +110,90 @@ def parse_int_list(s):
     default="pedm",
     show_default=True,
 )
-
 # Hyperparameters.
-@click.option("--duration", help="Training duration", metavar="MIMG", type=click.FloatRange(min=0, min_open=True), default=200, show_default=True)
-@click.option("--batch", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=512, show_default=True)
-@click.option("--batch-gpu", help="Limit batch size per GPU", metavar="INT", type=click.IntRange(min=1))
+@click.option(
+    "--duration",
+    help="Training duration",
+    metavar="MIMG",
+    type=click.FloatRange(min=0, min_open=True),
+    default=200,
+    show_default=True,
+)
+@click.option(
+    "--batch",
+    help="Total batch size",
+    metavar="INT",
+    type=click.IntRange(min=1),
+    default=512,
+    show_default=True,
+)
+@click.option(
+    "--batch-gpu",
+    help="Limit batch size per GPU",
+    metavar="INT",
+    type=click.IntRange(min=1),
+)
 @click.option("--cbase", help="Channel multiplier  [default: varies]", metavar="INT", type=int)
-@click.option("--cres", help="Channels per resolution  [default: varies]", metavar="LIST", type=parse_int_list)
-@click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=10e-4, show_default=True)
-@click.option("--ema", help="EMA half-life", metavar="MIMG", type=click.FloatRange(min=0), default=0.5, show_default=True)
-@click.option("--dropout", help="Dropout probability", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.13, show_default=True)
-@click.option("--augment", help="Augment probability", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.12, show_default=True)
-@click.option("--xflip", help="Enable dataset x-flips", metavar="BOOL", type=bool, default=False, show_default=True)
-@click.option("--implicit_mlp", help="encoding coordbefore sending to the conv", metavar="BOOL", type=bool, default=False, show_default=True)
-
+@click.option(
+    "--cres",
+    help="Channels per resolution  [default: varies]",
+    metavar="LIST",
+    type=parse_int_list,
+)
+@click.option(
+    "--attn_resolutions",
+    help="Resolutions to use attention layers",
+    metavar="LIST",
+    type=parse_int_list,
+)
+@click.option(
+    "--lr",
+    help="Learning rate",
+    metavar="FLOAT",
+    type=click.FloatRange(min=0, min_open=True),
+    default=10e-4,
+    show_default=True,
+)
+@click.option(
+    "--ema",
+    help="EMA half-life",
+    metavar="MIMG",
+    type=click.FloatRange(min=0),
+    default=0.5,
+    show_default=True,
+)
+@click.option(
+    "--dropout",
+    help="Dropout probability",
+    metavar="FLOAT",
+    type=click.FloatRange(min=0, max=1),
+    default=0.13,
+    show_default=True,
+)
+@click.option(
+    "--augment",
+    help="Augment probability",
+    metavar="FLOAT",
+    type=click.FloatRange(min=0, max=1),
+    default=0.12,
+    show_default=True,
+)
+@click.option(
+    "--xflip",
+    help="Enable dataset x-flips",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
+@click.option(
+    "--implicit_mlp",
+    help="encoding coordbefore sending to the conv",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
 # Classification-related.
 @click.option(
     "--eval_every",
@@ -94,34 +203,93 @@ def parse_int_list(s):
     default=5,
     show_default=True,
 )
-
 # Performance-related.
-@click.option("--fp16", help="Enable mixed-precision training", metavar="BOOL", type=bool, default=False, show_default=True)
-@click.option("--ls", help="Loss scaling", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
-@click.option("--bench", help="Enable cuDNN benchmarking", metavar="BOOL", type=bool, default=True, show_default=True)
-@click.option("--cache", help="Cache dataset in CPU memory", metavar="BOOL", type=bool, default=True, show_default=True)
-@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
-
+@click.option(
+    "--fp16",
+    help="Enable mixed-precision training",
+    metavar="BOOL",
+    type=bool,
+    default=False,
+    show_default=True,
+)
+@click.option(
+    "--ls",
+    help="Loss scaling",
+    metavar="FLOAT",
+    type=click.FloatRange(min=0, min_open=True),
+    default=1,
+    show_default=True,
+)
+@click.option(
+    "--bench",
+    help="Enable cuDNN benchmarking",
+    metavar="BOOL",
+    type=bool,
+    default=True,
+    show_default=True,
+)
+@click.option(
+    "--cache",
+    help="Cache dataset in CPU memory",
+    metavar="BOOL",
+    type=bool,
+    default=True,
+    show_default=True,
+)
+@click.option(
+    "--workers",
+    help="DataLoader worker processes",
+    metavar="INT",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+)
 # I/O-related.
 @click.option("--desc", help="String to include in result dir name", metavar="STR", type=str)
 @click.option("--nosubdir", help="Do not create a subdirectory for results", is_flag=True)
-@click.option("--tick", help="How often to print progress", metavar="KIMG", type=click.IntRange(min=1), default=50, show_default=True)
-@click.option("--snap", help="How often to save snapshots", metavar="TICKS", type=click.IntRange(min=1), default=50, show_default=True)
-@click.option("--dump", help="How often to dump state", metavar="TICKS", type=click.IntRange(min=1), default=50, show_default=True)
+@click.option(
+    "--tick",
+    help="How often to print progress",
+    metavar="KIMG",
+    type=click.IntRange(min=1),
+    default=50,
+    show_default=True,
+)
+@click.option(
+    "--snap",
+    help="How often to save snapshots",
+    metavar="TICKS",
+    type=click.IntRange(min=1),
+    default=50,
+    show_default=True,
+)
+@click.option(
+    "--dump",
+    help="How often to dump state",
+    metavar="TICKS",
+    type=click.IntRange(min=1),
+    default=50,
+    show_default=True,
+)
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int)
-@click.option("--transfer", help="Transfer learning from network pickle", metavar="PKL|URL", type=str)
+@click.option(
+    "--transfer",
+    help="Transfer learning from network pickle",
+    metavar="PKL|URL",
+    type=str,
+)
 @click.option("--resume", help="Resume from previous training state", metavar="PT", type=str)
 @click.option("-n", "--dry-run", help="Print training options and exit", is_flag=True)
 def main(**kwargs):
-    """Train diffusion-based generative model using the techniques described in the
+    """
+    Train diffusion-based generative model using the techniques described in the
     paper "Elucidating the Design Space of Diffusion-Based Generative Models".
 
     Examples:
 
-    \b
-    # Train DDPM++ model for class-conditional CIFAR-10 using 8 GPUs
-    torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs \\
-        --data=datasets/cifar10-32x32.zip --cond=1 --arch=ddpmpp
+    Train DDPM++ model for class-conditional CIFAR-10 using 8 GPUs
+
+    `torchrun --standalone --nproc_per_node=8 train.py --outdir=training-runs --data=datasets/cifar10-32x32.zip --cond=1 --arch=ddpmpp`
     """
     opts = dnnlib.EasyDict(kwargs)
     torch.multiprocessing.set_start_method("spawn")
@@ -130,12 +298,20 @@ def main(**kwargs):
     # Initialize config dict.
     c = dnnlib.EasyDict()
     c.dataset_kwargs = dnnlib.EasyDict(
-        class_name="training.dataset.ImageFolderDataset", path=opts.train_dir, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
+        class_name="training.dataset.ImageFolderDataset",
+        path=opts.train_dir,
+        use_labels=opts.cond,
+        xflip=opts.xflip,
+        cache=opts.cache,
     )
     # ---------------------
     # Add valid dataset.
     c.val_dataset_kwargs = dnnlib.EasyDict(
-        class_name="training.dataset.ImageFolderDataset", path=opts.val_dir, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache
+        class_name="training.dataset.ImageFolderDataset",
+        path=opts.val_dir,
+        use_labels=opts.cond,
+        xflip=opts.xflip,
+        cache=opts.cache,
     )
     # ---------------------
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
@@ -160,17 +336,37 @@ def main(**kwargs):
 
     # Network architecture.
     if opts.arch == "ddpmpp":
-        c.network_kwargs.update(model_type="SongUNet", embedding_type="positional", encoder_type="standard", decoder_type="standard")
-        c.network_kwargs.update(channel_mult_noise=1, resample_filter=[1, 1], model_channels=128, channel_mult=[2, 2, 2])
+        c.network_kwargs.update(
+            model_type="SongUNet",
+            embedding_type="positional",
+            encoder_type="standard",
+            decoder_type="standard",
+        )
+        c.network_kwargs.update(
+            channel_mult_noise=1,
+            resample_filter=[1, 1],
+            model_channels=128,
+            channel_mult=[2, 2, 2],
+        )
     elif opts.arch == "ncsnpp":
-        c.network_kwargs.update(model_type="SongUNet", embedding_type="fourier", encoder_type="residual", decoder_type="standard")
-        c.network_kwargs.update(channel_mult_noise=2, resample_filter=[1, 3, 3, 1], model_channels=128, channel_mult=[2, 2, 2])
+        c.network_kwargs.update(
+            model_type="SongUNet",
+            embedding_type="fourier",
+            encoder_type="residual",
+            decoder_type="standard",
+        )
+        c.network_kwargs.update(
+            channel_mult_noise=2,
+            resample_filter=[1, 3, 3, 1],
+            model_channels=128,
+            channel_mult=[2, 2, 2],
+        )
     elif opts.arch == "adm":
         c.network_kwargs.update(model_type="DhariwalUNet", model_channels=192, channel_mult=[1, 2, 3, 4])
     # ----------------------
     else:
         assert opts.arch == "ebm"
-        c.network_kwargs.update(model_type="EBMUNet")
+        c.network_kwargs.update(model_type="EBMUNet", model_channels=192, channel_mult=[1, 2, 3, 4])
     # ----------------------
 
     # Preconditioning & loss function.
@@ -181,8 +377,8 @@ def main(**kwargs):
         c.network_kwargs.class_name = "training.networks.VEPrecond"
         c.loss_kwargs.class_name = "training.loss.VELoss"
     elif opts.precond == "pedm":
-        c.network_kwargs.class_name = "training.networks.Patch_EDMPrecond"
-        c.loss_kwargs.class_name = "training.patch_loss.Patch_EDMLoss"
+        c.network_kwargs.class_name = "training.networks.PatchEDMPrecond"
+        c.loss_kwargs.class_name = "training.patch_loss.PatchEDMLoss"
     else:
         assert opts.precond == "edm"
         c.network_kwargs.class_name = "training.networks.EDMPrecond"
@@ -191,16 +387,23 @@ def main(**kwargs):
     # Network options.
     if opts.cbase is not None:
         c.network_kwargs.model_channels = opts.cbase
+
     if opts.cres is not None:
         c.network_kwargs.channel_mult = opts.cres
+
+    if opts.attn_resolutions is not None:
+        c.network_kwargs.attn_resolutions = opts.attn_resolutions
+
     if opts.augment:
         c.augment_kwargs = dnnlib.EasyDict(class_name="training.augment.AugmentPipe", p=opts.augment)
         c.augment_kwargs.update(xflip=1e8, yflip=1, scale=1, rotate_frac=1, aniso=1, translate_frac=1)
         c.network_kwargs.augment_dim = 9
         # c.augment_kwargs.update(brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1)
         # c.network_kwargs.augment_dim = 6
+
     if opts.implicit_mlp:
         c.network_kwargs.implicit_mlp = True
+
     c.network_kwargs.update(dropout=opts.dropout, use_fp16=opts.fp16)
 
     # Training options.
@@ -280,7 +483,11 @@ def main(**kwargs):
         os.makedirs(c.run_dir, exist_ok=True)
         with open(os.path.join(c.run_dir, "training_options.json"), "wt") as f:
             json.dump(c, f, indent=2)
-        dnnlib.util.Logger(file_name=os.path.join(c.run_dir, "log.txt"), file_mode="a", should_flush=True)
+        dnnlib.util.Logger(
+            file_name=os.path.join(c.run_dir, "log.txt"),
+            file_mode="a",
+            should_flush=True,
+        )
 
     # Train.
     training_loop.training_loop(**c)
