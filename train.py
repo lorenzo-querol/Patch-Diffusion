@@ -45,239 +45,51 @@ def parse_int_list(s):
 
 
 @click.command()
+
 # Patch options
-@click.option(
-    "--real_p",
-    help="Full size image ratio",
-    metavar="INT",
-    type=click.FloatRange(min=0, max=1),
-    default=0.5,
-    show_default=True,
-)
-@click.option(
-    "--train_on_latents",
-    help="Training on latent embeddings",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
-@click.option(
-    "--progressive",
-    help="Training on latent embeddings",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
+@click.option("--real_p", help="Full size image ratio", metavar="INT", type=click.FloatRange(min=0, max=1), default=0.5, show_default=True)
+@click.option("--train_on_latents", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option("--progressive", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
 # Main options.
 @click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
-@click.option(
-    "--train_dir",
-    help="Path to the train dataset",
-    metavar="ZIP|DIR",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--val_dir",
-    help="Path to the valid dataset",
-    metavar="ZIP|DIR",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--cond",
-    help="Train class-conditional model",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
-@click.option(
-    "--arch",
-    help="Network architecture",
-    metavar="ddpmpp|ncsnpp|adm",
-    type=click.Choice(["ddpmpp", "ncsnpp", "adm", "ebm"]),
-    default="ddpmpp",
-    show_default=True,
-)
-@click.option(
-    "--precond",
-    help="Preconditioning & loss function",
-    metavar="vp|ve|edm",
-    type=click.Choice(["vp", "ve", "edm", "pedm"]),
-    default="pedm",
-    show_default=True,
-)
+@click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
+@click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
+@click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option("--arch", help="Network architecture", metavar="ddpmpp|ncsnpp|adm", type=click.Choice(["ddpmpp", "ncsnpp", "adm", "ebm"]), default="ddpmpp", show_default=True)
+@click.option("--precond", help="Preconditioning & loss function", metavar="vp|ve|edm", type=click.Choice(["vp", "ve", "edm", "pedm"]), default="pedm", show_default=True)
+
 # Hyperparameters.
-@click.option(
-    "--duration",
-    help="Training duration",
-    metavar="MIMG",
-    type=click.FloatRange(min=0, min_open=True),
-    default=200,
-    show_default=True,
-)
-@click.option(
-    "--batch",
-    help="Total batch size",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=512,
-    show_default=True,
-)
-@click.option(
-    "--batch-gpu",
-    help="Limit batch size per GPU",
-    metavar="INT",
-    type=click.IntRange(min=1),
-)
+@click.option("--duration", help="Training duration", metavar="MIMG", type=click.FloatRange(min=0, min_open=True), default=200, show_default=True)
+@click.option("--batch", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=512, show_default=True)
+@click.option("--batch-gpu", help="Limit batch size per GPU", metavar="INT", type=click.IntRange(min=1))
 @click.option("--cbase", help="Channel multiplier  [default: varies]", metavar="INT", type=int)
-@click.option(
-    "--cres",
-    help="Channels per resolution  [default: varies]",
-    metavar="LIST",
-    type=parse_int_list,
-)
-@click.option(
-    "--attn_resolutions",
-    help="Resolutions to use attention layers",
-    metavar="LIST",
-    type=parse_int_list,
-)
-@click.option(
-    "--lr",
-    help="Learning rate",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-    default=10e-4,
-    show_default=True,
-)
-@click.option(
-    "--ema",
-    help="EMA half-life",
-    metavar="MIMG",
-    type=click.FloatRange(min=0),
-    default=0.5,
-    show_default=True,
-)
-@click.option(
-    "--dropout",
-    help="Dropout probability",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, max=1),
-    default=0.13,
-    show_default=True,
-)
-@click.option(
-    "--augment",
-    help="Augment probability",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, max=1),
-    default=0.12,
-    show_default=True,
-)
-@click.option(
-    "--xflip",
-    help="Enable dataset x-flips",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
-@click.option(
-    "--implicit_mlp",
-    help="encoding coordbefore sending to the conv",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
+@click.option("--cres", help="Channels per resolution  [default: varies]", metavar="LIST", type=parse_int_list)
+@click.option("--attn_resolutions", help="Resolutions to use attention layers", metavar="LIST", type=parse_int_list)
+@click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=10e-4, show_default=True)
+@click.option("--ema", help="EMA half-life", metavar="MIMG", type=click.FloatRange(min=0), default=0.5, show_default=True)
+@click.option("--dropout", help="Dropout probability", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.13, show_default=True)
+@click.option("--augment", help="Augment probability", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.12, show_default=True)
+@click.option("--xflip", help="Enable dataset x-flips", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option("--implicit_mlp", help="encoding coordbefore sending to the conv", metavar="BOOL", type=bool, default=False, show_default=True)
+
 # Classification-related.
-@click.option(
-    "--eval_every",
-    help="How often to evaluate the model on the test dataset",
-    metavar="TICKS",
-    type=click.IntRange(min=1),
-    default=5,
-    show_default=True,
-)
+@click.option("--eval_every", help="How often to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
+
 # Performance-related.
-@click.option(
-    "--fp16",
-    help="Enable mixed-precision training",
-    metavar="BOOL",
-    type=bool,
-    default=False,
-    show_default=True,
-)
-@click.option(
-    "--ls",
-    help="Loss scaling",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-    default=1,
-    show_default=True,
-)
-@click.option(
-    "--bench",
-    help="Enable cuDNN benchmarking",
-    metavar="BOOL",
-    type=bool,
-    default=True,
-    show_default=True,
-)
-@click.option(
-    "--cache",
-    help="Cache dataset in CPU memory",
-    metavar="BOOL",
-    type=bool,
-    default=True,
-    show_default=True,
-)
-@click.option(
-    "--workers",
-    help="DataLoader worker processes",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=1,
-    show_default=True,
-)
+@click.option("--fp16", help="Enable mixed-precision training", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option("--ls", help="Loss scaling", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
+@click.option("--bench", help="Enable cuDNN benchmarking", metavar="BOOL", type=bool, default=True, show_default=True)
+@click.option("--cache", help="Cache dataset in CPU memory", metavar="BOOL", type=bool, default=True, show_default=True)
+@click.option("--workers", help="DataLoader worker processes", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
+
 # I/O-related.
 @click.option("--desc", help="String to include in result dir name", metavar="STR", type=str)
 @click.option("--nosubdir", help="Do not create a subdirectory for results", is_flag=True)
-@click.option(
-    "--tick",
-    help="How often to print progress",
-    metavar="KIMG",
-    type=click.IntRange(min=1),
-    default=50,
-    show_default=True,
-)
-@click.option(
-    "--snap",
-    help="How often to save snapshots",
-    metavar="TICKS",
-    type=click.IntRange(min=1),
-    default=50,
-    show_default=True,
-)
-@click.option(
-    "--dump",
-    help="How often to dump state",
-    metavar="TICKS",
-    type=click.IntRange(min=1),
-    default=50,
-    show_default=True,
-)
+@click.option("--tick", help="How often to print progress", metavar="KIMG", type=click.IntRange(min=1), default=10, show_default=True)
+@click.option("--snap", help="How often to save snapshots", metavar="TICKS", type=click.IntRange(min=1), default=50, show_default=True)
+@click.option("--dump", help="How often to dump state", metavar="TICKS", type=click.IntRange(min=1), default=100, show_default=True)
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int)
-@click.option(
-    "--transfer",
-    help="Transfer learning from network pickle",
-    metavar="PKL|URL",
-    type=str,
-)
+@click.option("--transfer", help="Transfer learning from network pickle", metavar="PKL|URL", type=str)
 @click.option("--resume", help="Resume from previous training state", metavar="PT", type=str)
 @click.option("-n", "--dry-run", help="Print training options and exit", is_flag=True)
 def main(**kwargs):
@@ -362,12 +174,18 @@ def main(**kwargs):
             channel_mult=[2, 2, 2],
         )
     elif opts.arch == "adm":
-        c.network_kwargs.update(model_type="DhariwalUNet", model_channels=192, channel_mult=[1, 2, 3, 4])
-    # ----------------------
+        c.network_kwargs.update(
+            model_type="DhariwalUNet",
+            model_channels=192,
+            channel_mult=[1, 2, 3, 4],
+        )
     else:
         assert opts.arch == "ebm"
-        c.network_kwargs.update(model_type="EBMUNet", model_channels=192, channel_mult=[1, 2, 3, 4])
-    # ----------------------
+        c.network_kwargs.update(
+            model_type="EBMUNet",
+            model_channels=192,
+            channel_mult=[1, 2, 3, 4],
+        )
 
     # Preconditioning & loss function.
     if opts.precond == "vp":
@@ -422,12 +240,12 @@ def main(**kwargs):
         c.seed = int(seed)
 
     # Transfer learning and resume.
-    if opts.transfer is not None:
-        if opts.resume is not None:
+    if opts.transfer:
+        if opts.resume:
             raise click.ClickException("--transfer and --resume cannot be specified at the same time")
         c.resume_pkl = opts.transfer
         c.ema_rampup_ratio = None
-    elif opts.resume is not None:
+    elif opts.resume:
         match = re.fullmatch(r"training-state-(\d+).pt", os.path.basename(opts.resume))
         if not match or not os.path.isfile(opts.resume):
             raise click.ClickException("--resume must point to training-state-*.pt from a previous training run")
@@ -448,11 +266,8 @@ def main(**kwargs):
     elif opts.nosubdir:
         c.run_dir = opts.outdir
     else:
-        prev_run_dirs = []
-        if os.path.isdir(opts.outdir):
-            prev_run_dirs = [x for x in os.listdir(opts.outdir) if os.path.isdir(os.path.join(opts.outdir, x))]
-        prev_run_ids = [re.match(r"^\d+", x) for x in prev_run_dirs]
-        prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+        prev_run_dirs = [x for x in os.listdir(opts.outdir) if os.path.isdir(os.path.join(opts.outdir, x))]
+        prev_run_ids = [int(re.match(r"^\d+", x).group()) for x in prev_run_dirs if re.match(r"^\d+", x)]
         cur_run_id = max(prev_run_ids, default=-1) + 1
         c.run_dir = os.path.join(opts.outdir, f"{cur_run_id:05d}-{desc}")
         assert not os.path.exists(c.run_dir)

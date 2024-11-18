@@ -150,7 +150,6 @@ def training_loop(
     # Setup optimizer.
     dist.print0("Setting up optimizer...")
     loss_fn = dnnlib.util.construct_class_by_name(**loss_kwargs)  # training.loss.(VP|VE|EDM)Loss
-    ece_fn = ECELoss()
     optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs)  # subclass of torch.optim.Optimizer
     augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None  # training.augment.AugmentPipe
     ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
@@ -229,20 +228,22 @@ def training_loop(
 
             labels = labels.to(device)
 
-            with misc.ddp_sync(ddp, sync=False):
-                ce_loss, cls_acc, cls_ece = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe, cls_mode=True)
-                CE_WEIGHT = 1.0
-                cls_loss = CE_WEIGHT * ce_loss.mean()
+            CE_WEIGHT = 0.0
+            if CE_WEIGHT > 0:
+                with misc.ddp_sync(ddp, sync=False):
+                    ce_loss, cls_acc, cls_ece = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe, cls_mode=True)
 
-                training_stats.report("train/cls_acc", cls_acc)
-                training_stats.report("train/cls_loss", cls_loss.mean())
-                training_stats.report("train/cls_ece", cls_ece)
+                    cls_loss = CE_WEIGHT * ce_loss.mean()
 
-                cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
+                    training_stats.report("train/cls_acc", cls_acc)
+                    training_stats.report("train/cls_loss", cls_loss)
+                    training_stats.report("train/cls_ece", cls_ece)
+
+                    cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
 
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 loss = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe)
-                training_stats.report("train/sm_loss", loss)
+                training_stats.report("train/loss", loss)
 
                 loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
 
@@ -273,7 +274,7 @@ def training_loop(
             continue
 
         # Evaluate validation set.
-        if cur_tick % 5 == 0:
+        if cur_tick % 5 == 0 and CE_WEIGHT > 0:
             ddp.eval()
             val_loss, val_acc, val_ece = eval_cls(net, val_dataloader, loss_fn, device)
             ddp.train()
@@ -289,10 +290,11 @@ def training_loop(
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
-        fields += [f"sm_loss {loss.mean().item():<9.5f}"]
-        fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
-        fields += [f"cls_acc {cls_acc.item():<5.5f}"]
-        fields += [f"cls_ece {cls_ece.item():<5.5f}"]
+        fields += [f"loss {loss.mean().item():<9.5f}"]
+        if CE_WEIGHT > 0:
+            fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
+            fields += [f"cls_acc {cls_acc.item():<5.5f}"]
+            fields += [f"cls_ece {cls_ece.item():<5.5f}"]
 
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]

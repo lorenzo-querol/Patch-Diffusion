@@ -423,7 +423,7 @@ class EBMUNet(torch.nn.Module):
                 logits_logsumexp = logits.logsumexp(1)
 
                 if self.training:
-                    x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True, retain_graph=True)[0]
+                    x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True)[0]
                 else:
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
 

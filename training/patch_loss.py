@@ -85,35 +85,22 @@ class PatchEDMLoss:
         yn = y + n
 
         if cls_mode:
-            # combine noised and clean images
-            images_combined = torch.cat([yn, images], dim=0)
-            labels_combined = torch.cat([labels, labels], dim=0)
-            images_pos_combined = torch.cat([images_pos, images_pos], dim=0)
+            logits = net(yn, sigma, x_pos=images_pos, class_labels=labels, cls_mode=cls_mode, eval_mode=eval_mode)
+            cls_weight = weight / weight.max()
 
-            sigma_clean = torch.ones_like(sigma) * 0.01
-            sigma_combined = torch.cat([sigma, sigma_clean])
-
-            logits = net(images_combined, sigma_combined, x_pos=images_pos_combined, class_labels=labels_combined, cls_mode=cls_mode, eval_mode=eval_mode)
-
-            cls_weight = torch.log(sigma_combined)
-            cls_weight = cls_weight / cls_weight.mean()
-
-            ce_loss = F.cross_entropy(logits, labels_combined.argmax(dim=1), reduction="none")
+            ce_loss = F.cross_entropy(logits, labels.argmax(dim=1), reduction="none")
             ce_loss = (ce_loss * cls_weight).mean()
 
-            correct = (logits.argmax(dim=1) == labels_combined.argmax(dim=1)).float().mean()
-            ece = self.ece_criterion(logits, labels_combined.argmax(dim=1))
+            correct = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
+            ece = self.ece_criterion(logits, labels.argmax(dim=1))
 
             return ce_loss, correct, ece
 
-        # True score is the negative noise divided by the noise variance.
-        true_score = -n / (sigma**2)
-
         # Predicted score is the output of the network.
-        pred_score = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels)
+        D_yn = net(yn, sigma, x_pos=images_pos, class_labels=labels, augment_labels=augment_labels)
 
         # Compute loss.
-        loss = weight * ((true_score - pred_score) ** 2)
+        loss = weight * ((D_yn - y) ** 2)
 
         return loss
 
