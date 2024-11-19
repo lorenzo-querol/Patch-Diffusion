@@ -162,11 +162,6 @@ class Dataset(torch.utils.data.Dataset):
         return self._get_raw_labels().dtype == np.int64
 
 
-# ----------------------------------------------------------------------------
-# Dataset subclass that loads images recursively from the specified directory
-# or ZIP file.
-
-
 class ImageFolderDataset(Dataset):
     def __init__(
         self,
@@ -181,9 +176,7 @@ class ImageFolderDataset(Dataset):
 
         if os.path.isdir(self._path):
             self._type = "dir"
-            self._all_fnames = {
-                os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files
-            }
+            self._all_fnames = {os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files}
         elif self._file_ext(self._path) == ".zip":
             self._type = "zip"
             self._all_fnames = set(self._get_zipfile().namelist())
@@ -255,4 +248,83 @@ class ImageFolderDataset(Dataset):
         return labels
 
 
-# ----------------------------------------------------------------------------
+# class CustomImageDataset(Dataset):
+#     """
+#     Custom dataset class to load images and labels.
+#     """
+
+#     def __init__(self, root_dir, transform=None):
+#         """
+#         Args:
+#             root_dir (str): Directory containing images and `dataset.json`.
+#             transform (callable, optional): A function/transform to apply to the images.
+#         """
+#         self.root_dir = root_dir
+#         self.transform = transform
+#         self.image_paths = []
+#         self.labels = []
+
+#         # Load metadata (image paths and labels)
+#         self._load_metadata()
+
+#         self.transforms = (
+#             transforms.Compose(
+#                 [
+#                     transforms.RandomResizedCrop(self.resolution),
+#                     transforms.RandomHorizontalFlip(),
+#                     transforms.ToTensor(),
+#                     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+#                 ]
+#             )
+#             if transform is None
+#             else transform
+#         )
+
+#     def _load_metadata(self):
+#         """Load image paths and labels from the `dataset.json`."""
+#         json_path = os.path.join(self.root_dir, "dataset.json")
+#         if not os.path.exists(json_path):
+#             raise FileNotFoundError(f"`dataset.json` not found in {self.root_dir}")
+
+#         # Parse JSON file
+#         with open(json_path, "r") as f:
+#             metadata = json.load(f)
+
+#         labels_dict = metadata.get("labels", {})
+#         if not labels_dict:
+#             raise ValueError("No labels found in `dataset.json`")
+
+#         # Populate image paths and labels
+#         for img_name, label in labels_dict.items():
+#             img_path = os.path.join(self.root_dir, img_name)
+#             if os.path.exists(img_path):
+#                 self.image_paths.append(img_path)
+#                 self.labels.append(label)
+#             else:
+#                 print(f"Warning: {img_path} does not exist and will be skipped.")
+
+#         self.num_classes = len(set(self.labels))
+#         self.resolution = Image.open(self.image_paths[0]).size[-1]
+#         self.dataset_size = len(self.labels)
+#         self.num_channels = 3
+
+#     def __len__(self):
+#         """Return the total number of samples."""
+#         return len(self.image_paths)
+
+#     def __getitem__(self, idx):
+#         """Return a single sample (image and label) at the specified index."""
+#         if torch.is_tensor(idx):
+#             idx = idx.tolist()
+
+#         img_path = self.image_paths[idx]
+#         label = self.labels[idx]
+
+#         # Load image
+#         image = Image.open(img_path).convert("RGB")
+
+#         # Apply transformations if specified
+#         if self.transform:
+#             image = self.transform(image)
+
+#         return image, label

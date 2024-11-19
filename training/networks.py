@@ -1,13 +1,3 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# This work is licensed under a Creative Commons
-# Attribution-NonCommercial-ShareAlike 4.0 International License.
-# You should have received a copy of the license along with this
-# work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
-
-"""Model architectures and preconditioning schemes used in the paper
-"Elucidating the Design Space of Diffusion-Based Generative Models"."""
-
 import math
 
 import numpy as np
@@ -289,7 +279,7 @@ class EBMUNet(torch.nn.Module):
         channel_mult_emb=4,  # Multiplier for the dimensionality of the embedding vector.
         num_blocks=3,  # Number of residual blocks per resolution.
         attn_resolutions=[32, 16, 8],  # List of resolutions with self-attention.
-        dropout=0.10,  #  Dropout probability of intermediate activations.
+        dropout_rate=0.10,  #  Dropout probability of intermediate activations.
         label_dropout=0,  # Dropout probability of class labels for classifier-free guidance.
     ):
         super().__init__()
@@ -297,7 +287,7 @@ class EBMUNet(torch.nn.Module):
         emb_channels = model_channels * channel_mult_emb
         init = dict(init_mode="kaiming_uniform", init_weight=np.sqrt(1 / 3), init_bias=np.sqrt(1 / 3))
         init_zero = dict(init_mode="kaiming_uniform", init_weight=0, init_bias=0)
-        block_kwargs = dict(emb_channels=emb_channels, channels_per_head=64, dropout=dropout, init=init, init_zero=init_zero)
+        block_kwargs = dict(emb_channels=emb_channels, channels_per_head=64, dropout=dropout_rate, init=init, init_zero=init_zero)
 
         # Mapping.
         self.map_noise = PositionalEmbedding(num_channels=model_channels)
@@ -391,10 +381,6 @@ class EBMUNet(torch.nn.Module):
                 emb = emb + self.map_label(tmp)
             emb = silu(emb)
 
-            # Personal Note:
-            # We compute the score function s(x) = -\nabla_x E(x) for the EBM.
-            # This can easily be done by computing the gradient of the output logits w.r.t. the input x.
-            # So it's \nabla_x log{p_{\theta}(x)} = \nabla_x f_{\theta}(x)
             with torch.enable_grad():
                 # Separate image and coordinates
                 image = x[:, :3]  # Assuming first 3 channels are RGB
@@ -428,66 +414,3 @@ class EBMUNet(torch.nn.Module):
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
 
                 return -1 * x_prime
-
-
-# ----------------------------------------------------------------------------
-# Patch Version of EDMPrecond.
-
-
-@persistence.persistent_class
-class PatchEDMPrecond(torch.nn.Module):
-    def __init__(
-        self,
-        img_resolution,  # Image resolution.
-        img_channels,  # Number of color channels.
-        out_channels=None,
-        label_dim=0,  # Number of class labels, 0 = unconditional.
-        use_fp16=False,  # Execute the underlying model at FP16 precision?
-        sigma_min=0,  # Minimum supported noise level.
-        sigma_max=float("inf"),  # Maximum supported noise level.
-        sigma_data=0.5,  # Expected standard deviation of the training data.
-        model_type="DhariwalUNet",  # Class name of the underlying model.
-        **model_kwargs,  # Keyword arguments for the underlying model.
-    ):
-        super().__init__()
-        self.img_resolution = img_resolution
-        self.img_channels = img_channels
-        self.label_dim = label_dim
-        self.use_fp16 = use_fp16
-        self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        self.sigma_data = sigma_data
-        self.out_channels = img_channels if out_channels is None else out_channels
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs)
-
-    def forward(self, x, sigma, x_pos=None, class_labels=None, force_fp32=False, cls_mode=False, eval_mode=False, **model_kwargs):
-        x = x.to(torch.float32)
-        sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
-        class_labels = None if self.label_dim == 0 else (torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim))
-        dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == "cuda") else torch.float32
-
-        if eval_mode:
-            x_in = torch.cat([x.to(dtype), x_pos], dim=1) if x_pos is not None else x.to(dtype)
-            F_x = self.model(x_in.to(dtype), sigma.flatten(), class_labels=class_labels, cls_mode=cls_mode, **model_kwargs)
-            return F_x
-
-        c_skip = self.sigma_data**2 / (sigma**2 + self.sigma_data**2)
-        c_out = sigma * self.sigma_data / (sigma**2 + self.sigma_data**2).sqrt()
-        c_in = 1 / (self.sigma_data**2 + sigma**2).sqrt()
-        c_noise = sigma.log() / 4
-
-        x_in = torch.cat([c_in * x, x_pos], dim=1) if x_pos is not None else c_in * x
-        F_x = self.model((x_in).to(dtype), c_noise.flatten(), class_labels=class_labels, cls_mode=cls_mode, **model_kwargs)
-        assert F_x.dtype == dtype
-
-        if cls_mode:
-            return F_x
-
-        D_x = c_skip * x + c_out * F_x.to(torch.float32)
-        return D_x
-
-    def round_sigma(self, sigma):
-        return torch.as_tensor(sigma)
-
-
-# ----------------------------------------------------------------------------

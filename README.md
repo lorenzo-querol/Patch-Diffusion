@@ -46,21 +46,24 @@ python dataset_tool.py --dataset cifar10 --dest data/cifar100 --transform center
 
 You can train new models using `train.py`. For example:
 
+
 ```.bash
 torchrun --standalone --nproc_per_node=2 train.py \
     --outdir=training-runs \
     --train_dir=data/cifar100/train \
     --val_dir=data/cifar100/valid \
     --cond=1 \
-    --arch=ebm \
-    --cres=1,2,2 \
+    --model_channels=192 \
+    --channel_mult=1,2,2 \
     --attn_resolutions=16,8 \
-    --batch=128 \
-    --lr=1e-4 \
-    --dropout=0.0 \
-    --augment=0.0 \
-    --real_p=0.5 \
-    --seed=1
+    --dropout_rate=0.0 \
+    --schedule_name=cosine \
+    --timesteps=1000 \
+    --batch_size=128 \
+    --lr=2e-4 \
+    --ce_weight=0.001 \
+    --eval_interval=10 \
+    --real_p=0.5
 ```
 
 You can train new baseline models using `train_wrn.py`. For example:
@@ -108,7 +111,7 @@ torchrun --standalone --nproc_per_node=8 generate.py --steps=50 --resolution 64 
 torchrun --standalone --nproc_per_node=8 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --on_latents=1 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=/path-to-the-pkl/
 
 # CUSTOM For ADM Architecture we use
-torchrun --standalone --nproc_per_node=2 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=training-runs/00000-train-cond-ebm-pedm-gpus2-batch128-fp32/network-snapshot-007536.pkl --cfg=1.3
+torchrun --standalone --nproc_per_node=2 generate.py --steps=256 --S_churn=40 --S_min=0.05 --S_max=50 --S_noise=1.003 --resolution 32 --batch 64 --outdir=fid-tmp --seeds=0-49999 --subdirs --network=training-runs/00042-train-cond-ebm-pedm-gpus2-batch256-fp32/network-snapshot-003072.pkl --cfg=1.3
 ```
 
 We share our pretrained model checkpoints at [Huggingface Page](https://huggingface.co/zhendongw/patch-diffusion/tree/main). For ImageNet dataset, to generate with classifier-free-guidance, please add `--cfg=1.3` to the command. 

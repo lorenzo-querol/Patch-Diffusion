@@ -1,12 +1,3 @@
-# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# This work is licensed under a Creative Commons
-# Attribution-NonCommercial-ShareAlike 4.0 International License.
-# You should have received a copy of the license along with this
-# work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
-
-"""Main training loop."""
-
 import copy
 import json
 import os
@@ -16,63 +7,25 @@ import time
 import numpy as np
 import torch
 from diffusers import AutoencoderKL
+from calibration.ece import ECELoss
+from .patch import get_patches
+from .utils import evaluate, initialize, set_requires_grad
 
 import dnnlib
-from calibration.ece import ECELoss
 from torch_utils import distributed as dist
 from torch_utils import misc, training_stats
 
 
-def set_requires_grad(model, value):
-    for param in model.parameters():
-        param.requires_grad = value
-
-
-def eval_cls(net, val_dataloader, loss_fn, device):
-    losses, accs, eces = [], [], []
-
-    with torch.no_grad():
-        for i, (images, labels) in enumerate(val_dataloader):
-            images = images.to(device).to(torch.float32) / 127.5 - 1
-            labels = labels.to(device)
-
-            logits, ce_loss = loss_fn(
-                net=net,
-                images=images,
-                patch_size=images.shape[-1],
-                labels=labels,
-                cls_mode=True,
-                eval_mode=True,
-            )
-
-            acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
-            ece = ECELoss()(logits, labels.argmax(dim=1))
-
-            losses.append(ce_loss.mean().item())
-            accs.append(acc.item())
-            eces.append(ece.item())
-
-    return np.mean(losses), np.mean(accs), np.mean(eces)
-
-
-def initialize(seed: int, cudnn_benchmark: bool):
-    np.random.seed((seed * dist.get_world_size() + dist.get_rank()) % (1 << 31))
-    torch.manual_seed(np.random.randint(1 << 31))
-    torch.backends.cudnn.benchmark = cudnn_benchmark
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-
-
-def training_loop(
+def fit(
     run_dir=".",  # Output directory.
     dataset_kwargs={},  # Options for training set.
-    val_dataset_kwargs={},  # Options for valid set. (NEW!!)
-    data_loader_kwargs={},  # Options for torch.utils.data.DataLoader.
-    network_kwargs={},  # Options for model and preconditioning.
-    loss_kwargs={},  # Options for loss function.
+    val_dataset_kwargs={},  # Options for validation set.
+    dataloader_kwargs={},  # Options for dataloader.
+    network_kwargs={},  # Options for model
+    diffusion_kwargs={},  # Options for diffusion
     optimizer_kwargs={},  # Options for optimizer.
-    augment_kwargs=None,  # Options for augmentation pipeline, None = disable.
+    augment_kwargs=None,  # Options for augmentation.
+    ce_weight=1.0,  # Weight of the classification loss.
     seed=0,  # Global random seed.
     batch_size=512,  # Total batch size for one training iteration.
     batch_gpu=None,  # Limit batch size per GPU, None = no limit.
@@ -90,7 +43,6 @@ def training_loop(
     cudnn_benchmark=True,  # Enable torch.backends.cudnn.benchmark?
     real_p=0.5,
     train_on_latents=False,
-    progressive=False,
     device=torch.device("cuda"),
 ):
     # Initialize.
@@ -110,10 +62,10 @@ def training_loop(
     dist.print0("Loading dataset...")
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)  # subclass of training.dataset.Dataset
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
-    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **data_loader_kwargs))
+    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **dataloader_kwargs))
 
     val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs)  # subclass of training.dataset.Dataset
-    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **data_loader_kwargs)
+    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **dataloader_kwargs)
 
     img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
 
@@ -131,7 +83,7 @@ def training_loop(
     net_input_channels = img_channels + 2
     interface_kwargs = dict(
         img_resolution=img_resolution,
-        img_channels=net_input_channels,
+        in_channels=net_input_channels,
         out_channels=dataset_obj.label_dim,
         label_dim=dataset_obj.label_dim,
     )
@@ -139,19 +91,12 @@ def training_loop(
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)  # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
 
-    if dist.get_rank() == 0:
-        with torch.no_grad():
-            images = torch.zeros([batch_gpu, img_channels, net.img_resolution, net.img_resolution], device=device)
-            sigma = torch.ones([batch_gpu], device=device)
-            x_pos = torch.zeros([batch_gpu, 2, net.img_resolution, net.img_resolution], device=device)
-            labels = torch.zeros([batch_gpu, net.label_dim], device=device)
-            misc.print_module_summary(net, [images, sigma, x_pos, labels], max_nesting=2)
+    diffusion = dnnlib.util.construct_class_by_name(**diffusion_kwargs)  # subclass of training.diffusion.GaussianDiffusion
 
     # Setup optimizer.
     dist.print0("Setting up optimizer...")
-    loss_fn = dnnlib.util.construct_class_by_name(**loss_kwargs)  # training.loss.(VP|VE|EDM)Loss
-    optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs)  # subclass of torch.optim.Optimizer
-    augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None  # training.augment.AugmentPipe
+    optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs)
+    augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None
     ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
     ema = copy.deepcopy(net).eval().requires_grad_(False)
 
@@ -167,6 +112,7 @@ def training_loop(
         misc.copy_params_and_buffers(src_module=data["ema"], dst_module=net, require_all=False)
         misc.copy_params_and_buffers(src_module=data["ema"], dst_module=ema, require_all=False)
         del data  # conserve memory
+
     if resume_state_dump:
         dist.print0(f'Loading training state from "{resume_state_dump}"...')
         data = torch.load(resume_state_dump, map_location=torch.device("cpu"))
@@ -174,9 +120,9 @@ def training_loop(
         optimizer.load_state_dict(data["optimizer_state"])
         del data  # conserve memory
 
-    # Train.
+    # Train
     dist.print0(f"Training for {total_kimg} kimg...")
-    dist.print0()
+    dist.print0
     cur_nimg = resume_kimg * 1000
     cur_tick = 0
     tick_start_nimg = cur_nimg
@@ -206,6 +152,10 @@ def training_loop(
             patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
             batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
 
+    # Classification-related
+    criterion = torch.nn.CrossEntropyLoss(reduction="none")
+    ece_criterion = ECELoss()
+
     while True:
         # Accumulate gradients.
         optimizer.zero_grad(set_to_none=True)
@@ -218,22 +168,29 @@ def training_loop(
                 images_, labels_ = next(dataset_iterator)
                 images.append(images_), labels.append(labels_)
 
-            images, labels = torch.cat(images, dim=0), torch.cat(labels, dim=0)
-            images = images.to(device).to(torch.float32) / 127.5 - 1
+            images, labels = torch.cat(images), torch.cat(labels)
+            images, labels = images.to(device).to(torch.float32) / 127.5 - 1, labels.to(device)
 
             if train_on_latents:
                 with torch.no_grad():
                     images = img_vae.encode(images)["latent_dist"].sample()
                     images = latent_scale_factor * images
 
-            labels = labels.to(device)
+            if ce_weight > 0:
+                with misc.ddp_sync(ddp, False):
+                    t_cls = np.random.choice(1, size=(images.shape[0],))
+                    t_cls = torch.from_numpy(t_cls).long().to(device)
+                    sqrt_alphas_cumprod = torch.from_numpy(diffusion.sqrt_alphas_cumprod).to(device)[t_cls].float()
 
-            CE_WEIGHT = 0.0
-            if CE_WEIGHT > 0:
-                with misc.ddp_sync(ddp, sync=False):
-                    ce_loss, cls_acc, cls_ece = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe, cls_mode=True)
+                    patches, x_pos = get_patches(images, img_resolution)
+                    x_in = torch.cat([patches, x_pos], dim=1)
 
-                    cls_loss = CE_WEIGHT * ce_loss.mean()
+                    logits = ddp(x_in, t_cls, class_labels=labels, cls_mode=True)
+
+                    ce_loss = criterion(logits, labels.argmax(dim=1))
+                    cls_loss = ce_weight * (ce_loss * sqrt_alphas_cumprod).mean()
+                    cls_acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
+                    cls_ece = ece_criterion(logits, labels.argmax(dim=1))
 
                     training_stats.report("train/cls_acc", cls_acc)
                     training_stats.report("train/cls_loss", cls_loss)
@@ -242,22 +199,25 @@ def training_loop(
                     cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
 
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
-                loss = loss_fn(net=ddp, images=images, patch_size=patch_size, labels=labels, augment_pipe=augment_pipe)
-                training_stats.report("train/loss", loss)
+                patches, x_pos = get_patches(images, patch_size)
+                mse_loss = diffusion.training_losses(
+                    net=ddp,
+                    x_start=torch.cat([patches, x_pos], dim=1),
+                    t=torch.randint(0, diffusion.num_timesteps, (patches.shape[0],), device=device),
+                    net_kwargs={"class_labels": labels},
+                )
 
-                loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
+                training_stats.report("train/loss", mse_loss)
 
-        # Update weights.
+                mse_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
+
+        # Update weights
         for g in optimizer.param_groups:
             g["lr"] = optimizer_kwargs["lr"] * min(cur_nimg / max(lr_rampup_kimg * 1000, 1e-8), 1)
 
-        for param in net.parameters():
-            if param.grad is not None:
-                torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-
         optimizer.step()
 
-        # Update EMA.
+        # Update EMA
         ema_halflife_nimg = ema_halflife_kimg * 1000
         if ema_rampup_ratio is not None:
             ema_halflife_nimg = min(ema_halflife_nimg, cur_nimg * ema_rampup_ratio)
@@ -274,32 +234,32 @@ def training_loop(
             continue
 
         # Evaluate validation set.
-        if cur_tick % 5 == 0 and CE_WEIGHT > 0:
-            ddp.eval()
-            val_loss, val_acc, val_ece = eval_cls(net, val_dataloader, loss_fn, device)
-            ddp.train()
+        if ce_weight > 0 and cur_tick % 5 == 0:
+            val_loss, val_acc, val_ece = evaluate(ddp, val_dataloader, device)
 
             fields = []
             fields += [f"val_loss {training_stats.report0('val/cls_loss', val_loss):<9.5f}"]
             fields += [f"val_acc {training_stats.report0('val/cls_acc', val_acc):<5.5f}"]
             fields += [f"val_ece {training_stats.report0('val/cls_ece', val_ece):<5.5f}"]
             dist.print0(" ".join(fields))
+            dist.print0("")
 
-        # Print status line, accumulating the same information in training_stats.
+        # Print status line, accumulating the same information in training_stats
         tick_end_time = time.time()
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
-        fields += [f"loss {loss.mean().item():<9.5f}"]
-        if CE_WEIGHT > 0:
-            fields += [f"cls_loss {cls_loss.mean().item():<9.5f}"]
+        fields += [f"loss {mse_loss.mean().item():<9.5f}"]
+
+        if ce_weight > 0:
+            fields += [f"cls_loss {cls_loss.mean().item():<5.5f}"]
             fields += [f"cls_acc {cls_acc.item():<5.5f}"]
             fields += [f"cls_ece {cls_ece.item():<5.5f}"]
 
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
-        torch.cuda.reset_peak_memory_stats()
-        dist.print0(" ".join(fields))
+        dist.print0("\n".join(fields))
+        dist.print0("")
 
         # Check for abort.
         if (not done) and dist.should_stop():
@@ -309,7 +269,7 @@ def training_loop(
 
         # Save network snapshot.
         if (snapshot_ticks is not None) and (done or cur_tick % snapshot_ticks == 0):
-            data = dict(ema=ema, loss_fn=loss_fn, augment_pipe=augment_pipe, dataset_kwargs=dict(dataset_kwargs))
+            data = dict(ema=ema, augment_pipe=augment_pipe, dataset_kwargs=dict(dataset_kwargs))
             for key, value in data.items():
                 if isinstance(value, torch.nn.Module):
                     value = copy.deepcopy(value).eval().requires_grad_(False)
