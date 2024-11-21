@@ -14,6 +14,7 @@ import PIL.Image
 import json
 import torch
 import dnnlib
+import torchvision.transforms as transforms
 
 try:
     import pyspng
@@ -34,6 +35,7 @@ class Dataset(torch.utils.data.Dataset):
         xflip=False,  # Artificially double the size of the dataset via x-flips. Applied after max_size.
         random_seed=0,  # Random seed to use when applying max_size.
         cache=False,  # Cache images in CPU memory?
+        transform=None,  # Transform to apply to the images.
     ):
         self._name = name
         self._raw_shape = list(raw_shape)
@@ -42,6 +44,7 @@ class Dataset(torch.utils.data.Dataset):
         self._cached_images = dict()  # {raw_idx: np.ndarray, ...}
         self._raw_labels = None
         self._label_shape = None
+        self._transform = transform
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
@@ -102,7 +105,12 @@ class Dataset(torch.utils.data.Dataset):
         if self._xflip[idx]:
             assert image.ndim == 3  # CHW
             image = image[:, :, ::-1]
-        return image.copy(), self.get_label(idx)
+
+        if self._transform:
+            image = PIL.Image.fromarray(image.transpose(1, 2, 0))
+            image = self._transform(image)
+
+        return image, self.get_label(idx)
 
     def get_label(self, idx):
         label = self._get_raw_labels()[self._raw_idx[idx]]

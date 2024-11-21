@@ -173,7 +173,7 @@ class GaussianDiffusion:
         nonzero_mask = torch.reshape(1 - torch.cast(torch.equal(t, 0), torch.float32), [torch.shape(x)[0], 1, 1, 1])
         return model_mean + nonzero_mask * torch.exp(0.5 * model_log_variance) * noise
 
-    def training_losses(self, net, x_start, t, noise=None, net_kwargs=None):
+    def training_losses(self, net, x_start, t, noise=None, net_kwargs={}):
         """Compute the training loss for the diffusion model.
 
         Args:

@@ -116,7 +116,7 @@ def main(**kwargs):
         schedule_name=opts.schedule_name,
         timesteps=opts.timesteps,
     )
-    c.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.Adam", lr=opts.lr)
+    c.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr)
 
     c.real_p = opts.real_p
     c.train_on_latents = opts.train_on_latents

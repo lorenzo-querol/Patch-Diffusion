@@ -14,6 +14,61 @@ from .utils import evaluate, initialize, set_requires_grad
 import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import misc, training_stats
+from torchvision import transforms
+
+
+def get_patch_size_list(img_resolution, real_p, train_on_latents):
+    is_smaller_than_64 = img_resolution == 32
+
+    if is_smaller_than_64:
+        batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
+        if real_p < 1.0:
+            p_list = np.array([(1 - real_p), real_p])
+            patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
+            batch_mul_avg = np.sum(p_list * np.array([4, 1]))
+        else:
+            p_list = np.array([0, 1.0])
+            patch_list = np.array([16, 32])
+            batch_mul_avg = 1
+    else:
+        batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
+        if train_on_latents:
+            p_list = np.array([(1 - real_p), real_p])
+            patch_list = np.array([img_resolution // 2, img_resolution])
+            batch_mul_avg = np.sum(p_list * np.array([2, 1]))
+        else:
+            p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
+            patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
+            batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
+
+    return p_list, patch_list, batch_mul_dict, batch_mul_avg
+
+
+def encode_images_to_latents(img_vae, images, latent_scale_factor: float, train_on_latents: bool):
+    """Encode images to latents using the given VAE. Return latents if train_on_latents is True, otherwise the input images.
+    Args:
+        img_vae: VAE model.
+        images: Input images.
+        latent_scale_factor (float): Scaling factor for latents.
+        train_on_latents (bool): Whether to train on latents.
+    Returns:
+        Latents if train_on_latents is True, otherwise the input images.
+    """
+    if train_on_latents:
+        assert img_vae is not None, "img_vae must be provided when train_on_latents is True."
+        with torch.no_grad():
+            images = img_vae.encode(images)["latent_dist"].sample()
+            images = latent_scale_factor * images
+    return images
+
+
+def get_batch_data(dataset_iterator, batch_mul, device):
+    images, labels = [], []
+    for _ in range(batch_mul):
+        images_, labels_ = next(dataset_iterator)
+        images.append(images_), labels.append(labels_)
+    images, labels = torch.cat(images).to(device), torch.cat(labels).to(device)
+    return images, labels
 
 
 def fit(
@@ -60,43 +115,61 @@ def fit(
 
     # Load dataset.
     dist.print0("Loading dataset...")
-    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)  # subclass of training.dataset.Dataset
+    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
+    img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
+    del dataset_obj
+
+    train_transform = transforms.Compose(
+        [
+            transforms.RandomResizedCrop(img_resolution),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5] * img_channels, std=[0.5] * img_channels),
+        ]
+    )
+
+    val_transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5] * img_channels, std=[0.5] * img_channels),
+        ]
+    )
+
+    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs, transform=val_transform)
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **dataloader_kwargs))
 
-    val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs)  # subclass of training.dataset.Dataset
+    cls_dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs, transform=train_transform)
+    cls_dataset_sampler = misc.InfiniteSampler(dataset=cls_dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
+    cls_dataset_iterator = iter(torch.utils.data.DataLoader(dataset=cls_dataset_obj, sampler=cls_dataset_sampler, batch_size=batch_gpu, **dataloader_kwargs))
+
+    val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs, transform=val_transform)
     val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **dataloader_kwargs)
 
-    img_resolution, img_channels = dataset_obj.resolution, dataset_obj.num_channels
+    augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None
 
-    if train_on_latents:
-        img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
-        img_vae.eval()
-        set_requires_grad(img_vae, False)
-        latent_scale_factor = 0.18215
-        img_resolution, img_channels = dataset_obj.resolution // 8, 4
-    else:
-        img_vae = None
+    # if train_on_latents:
+    #     img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
+    #     img_vae.eval()
+    #     set_requires_grad(img_vae, False)
+    #     latent_scale_factor = 0.18215
+    #     img_resolution, img_channels = dataset_obj.resolution // 8, 4
+    # else:
+    #     img_vae = None
 
-    # Construct network.
+    # Construct network
     dist.print0("Constructing network...")
     net_input_channels = img_channels + 2
-    interface_kwargs = dict(
-        img_resolution=img_resolution,
-        in_channels=net_input_channels,
-        out_channels=dataset_obj.label_dim,
-        label_dim=dataset_obj.label_dim,
-    )
-
+    interface_kwargs = dict(img_resolution=img_resolution, in_channels=net_input_channels, out_channels=dataset_obj.label_dim, label_dim=dataset_obj.label_dim)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)  # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
-
     diffusion = dnnlib.util.construct_class_by_name(**diffusion_kwargs)  # subclass of training.diffusion.GaussianDiffusion
 
-    # Setup optimizer.
+    # Setup optimizer
     dist.print0("Setting up optimizer...")
     optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs)
-    augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None
+
+    # Distribute
     ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
     ema = copy.deepcopy(net).eval().requires_grad_(False)
 
@@ -122,7 +195,7 @@ def fit(
 
     # Train
     dist.print0(f"Training for {total_kimg} kimg...")
-    dist.print0
+    dist.print0()
     cur_nimg = resume_kimg * 1000
     cur_tick = 0
     tick_start_nimg = cur_nimg
@@ -130,86 +203,57 @@ def fit(
     dist.update_progress(cur_nimg // 1000, total_kimg)
     stats_jsonl = None
 
-    is_smaller_than_64 = img_resolution == 32
-    if is_smaller_than_64:
-        batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
-        if real_p < 1.0:
-            p_list = np.array([(1 - real_p), real_p])
-            patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
-            batch_mul_avg = np.sum(p_list * np.array([4, 1]))
-        else:
-            p_list = np.array([0, 1.0])
-            patch_list = np.array([16, 32])
-            batch_mul_avg = 1
-    else:
-        batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
-        if train_on_latents:
-            p_list = np.array([(1 - real_p), real_p])
-            patch_list = np.array([img_resolution // 2, img_resolution])
-            batch_mul_avg = np.sum(p_list * np.array([2, 1]))
-        else:
-            p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
-            patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
-            batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
+    p_list, patch_list, batch_mul_dict, batch_mul_avg = get_patch_size_list(img_resolution, real_p, train_on_latents)
 
     # Classification-related
-    criterion = torch.nn.CrossEntropyLoss(reduction="none")
+    criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=0.2)
     ece_criterion = ECELoss()
 
     while True:
-        # Accumulate gradients.
+        # Accumulate gradients
         optimizer.zero_grad(set_to_none=True)
-        for round_idx in range(num_accumulation_rounds):
-            patch_size = int(np.random.choice(patch_list, p=p_list))
-            batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
-            images, labels = [], []
+        patch_size = int(np.random.choice(patch_list, p=p_list))
+        batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
 
-            for _ in range(batch_mul):
-                images_, labels_ = next(dataset_iterator)
-                images.append(images_), labels.append(labels_)
+        images, _ = get_batch_data(dataset_iterator, batch_mul, device)
+        cls_images, cls_labels = get_batch_data(cls_dataset_iterator, batch_mul, device)
 
-            images, labels = torch.cat(images), torch.cat(labels)
-            images, labels = images.to(device).to(torch.float32) / 127.5 - 1, labels.to(device)
+        # Encode images to latents if needed
+        # images = encode_images_to_latents(train_on_latents, img_vae, latent_scale_factor, images)
 
-            if train_on_latents:
-                with torch.no_grad():
-                    images = img_vae.encode(images)["latent_dist"].sample()
-                    images = latent_scale_factor * images
+        # Sample randomized timesteps
+        timesteps = torch.randint(0, diffusion.num_timesteps, (images.shape[0],), device=device)
 
-            if ce_weight > 0:
-                with misc.ddp_sync(ddp, False):
-                    t_cls = np.random.choice(1, size=(images.shape[0],))
-                    t_cls = torch.from_numpy(t_cls).long().to(device)
-                    sqrt_alphas_cumprod = torch.from_numpy(diffusion.sqrt_alphas_cumprod).to(device)[t_cls].float()
+        L = 0
 
-                    patches, x_pos = get_patches(images, img_resolution)
-                    x_in = torch.cat([patches, x_pos], dim=1)
+        if ce_weight > 0:
+            sqrt_alphas_cumprod = torch.from_numpy(diffusion.sqrt_alphas_cumprod).to(device)[timesteps].float()
 
-                    logits = ddp(x_in, t_cls, class_labels=labels, cls_mode=True)
+            # Return full-size images and positions
+            patches, x_pos = get_patches(cls_images, img_resolution)
+            x_in = torch.cat([patches, x_pos], dim=1)
 
-                    ce_loss = criterion(logits, labels.argmax(dim=1))
-                    cls_loss = ce_weight * (ce_loss * sqrt_alphas_cumprod).mean()
-                    cls_acc = (logits.argmax(dim=1) == labels.argmax(dim=1)).float().mean()
-                    cls_ece = ece_criterion(logits, labels.argmax(dim=1))
+            logits = ddp(x_in, timesteps, class_labels=cls_labels, cls_mode=True)
 
-                    training_stats.report("train/cls_acc", cls_acc)
-                    training_stats.report("train/cls_loss", cls_loss)
-                    training_stats.report("train/cls_ece", cls_ece)
+            ce_loss = criterion(logits, cls_labels.argmax(dim=1))
+            cls_loss = ce_weight * (ce_loss * sqrt_alphas_cumprod).mean()
+            cls_acc = (logits.argmax(dim=1) == cls_labels.argmax(dim=1)).float().mean()
+            cls_ece = ece_criterion(logits, cls_labels.argmax(dim=1))
 
-                    cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
+            training_stats.report("train/cls_acc", cls_acc)
+            training_stats.report("train/cls_loss", cls_loss)
+            training_stats.report("train/cls_ece", cls_ece)
 
-            with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
-                patches, x_pos = get_patches(images, patch_size)
-                mse_loss = diffusion.training_losses(
-                    net=ddp,
-                    x_start=torch.cat([patches, x_pos], dim=1),
-                    t=torch.randint(0, diffusion.num_timesteps, (patches.shape[0],), device=device),
-                    net_kwargs={"class_labels": labels},
-                )
+            L += cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul)
 
-                training_stats.report("train/loss", mse_loss)
+        patches, x_pos = get_patches(images, patch_size)
+        mse_loss = diffusion.training_losses(net=ddp, x_start=torch.cat([patches, x_pos], dim=1), t=timesteps)
 
-                mse_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul).backward()
+        training_stats.report("train/loss", mse_loss)
+
+        L += mse_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul)
+
+        L.backward()
 
         # Update weights
         for g in optimizer.param_groups:
@@ -229,19 +273,22 @@ def fit(
         # Perform maintenance tasks once per tick.
         cur_nimg += int(batch_size * batch_mul_avg)
         done = cur_nimg >= total_kimg * 1000
-
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
             continue
 
-        # Evaluate validation set.
+        # Evaluate on validation set
         if ce_weight > 0 and cur_tick % 5 == 0:
             val_loss, val_acc, val_ece = evaluate(ddp, val_dataloader, device)
 
+            training_stats.report("val/cls_loss", val_loss)
+            training_stats.report("val/cls_acc", val_acc)
+            training_stats.report("val/cls_ece", val_ece)
+
             fields = []
-            fields += [f"val_loss {training_stats.report0('val/cls_loss', val_loss):<9.5f}"]
+            fields += [f"val_loss {training_stats.report0('val/cls_loss', val_loss):<5.5f}"]
             fields += [f"val_acc {training_stats.report0('val/cls_acc', val_acc):<5.5f}"]
             fields += [f"val_ece {training_stats.report0('val/cls_ece', val_ece):<5.5f}"]
-            dist.print0(" ".join(fields))
+            dist.print0("\t".join(fields))
             dist.print0("")
 
         # Print status line, accumulating the same information in training_stats
@@ -249,7 +296,7 @@ def fit(
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
-        fields += [f"loss {mse_loss.mean().item():<9.5f}"]
+        fields += [f"loss {mse_loss.mean().item():<5.5f}"]
 
         if ce_weight > 0:
             fields += [f"cls_loss {cls_loss.mean().item():<5.5f}"]

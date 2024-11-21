@@ -273,17 +273,14 @@ class EBMUNet(torch.nn.Module):
         in_channels,  # Number of color channels at input.
         out_channels,  # Number of color channels at output.
         label_dim=0,  # Number of class labels, 0 = unconditional.
-        augment_dim=0,  # Augmentation label dimensionality, 0 = no augmentation.
         model_channels=192,  # Base multiplier for the number of channels.
         channel_mult=[1, 2, 3, 4],  # Per-resolution multipliers for the number of channels.
         channel_mult_emb=4,  # Multiplier for the dimensionality of the embedding vector.
         num_blocks=3,  # Number of residual blocks per resolution.
         attn_resolutions=[32, 16, 8],  # List of resolutions with self-attention.
         dropout_rate=0.10,  #  Dropout probability of intermediate activations.
-        label_dropout=0,  # Dropout probability of class labels for classifier-free guidance.
     ):
         super().__init__()
-        self.label_dropout = label_dropout
         emb_channels = model_channels * channel_mult_emb
         init = dict(init_mode="kaiming_uniform", init_weight=np.sqrt(1 / 3), init_bias=np.sqrt(1 / 3))
         init_zero = dict(init_mode="kaiming_uniform", init_weight=0, init_bias=0)
@@ -291,7 +288,6 @@ class EBMUNet(torch.nn.Module):
 
         # Mapping.
         self.map_noise = PositionalEmbedding(num_channels=model_channels)
-        self.map_augment = Linear(in_features=augment_dim, out_features=model_channels, bias=False, **init_zero) if augment_dim else None
         self.map_layer0 = Linear(in_features=model_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
         self.label_dim = label_dim
@@ -345,19 +341,13 @@ class EBMUNet(torch.nn.Module):
             augment_labels:     Optional augmentation labels
             cls_mode:           If True, runs in classification mode
         """
-        # Mapping.
-        emb = self.map_noise(noise_labels)
-        if self.map_augment is not None and augment_labels is not None:
-            emb = emb + self.map_augment(augment_labels)
-        emb = silu(self.map_layer0(emb))
-        emb = self.map_layer1(emb)
-
         if cls_mode:
-            # Create one-hot dummy labels (batch_size x label_dim)
-            dummy_labels = torch.zeros((x.shape[0], self.label_dim), device=x.device)
-            if self.map_label is not None:
-                emb = emb + self.map_label(dummy_labels)
-            emb = silu(emb)
+            emb = self.map_noise(noise_labels)
+            emb = silu(self.map_layer0(emb))
+            emb = self.map_layer1(emb)
+
+            y = torch.ones((x.shape[0], self.label_dim)).to(x.device)
+            emb += self.map_label(y)
 
             # Encoder.
             skips = []
@@ -374,14 +364,15 @@ class EBMUNet(torch.nn.Module):
             x = self.out(x)
             return self.fc(x)
         else:
-            if self.map_label is not None and class_labels is not None:
-                tmp = class_labels
-                if self.training and self.label_dropout:
-                    tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
-                emb = emb + self.map_label(tmp)
-            emb = silu(emb)
-
             with torch.enable_grad():
+                # Noise embedding
+                emb = self.map_noise(noise_labels)
+                emb = silu(self.map_layer0(emb))
+                emb = self.map_layer1(emb)
+
+                if class_labels is not None:
+                    emb += self.map_label(class_labels)
+
                 # Separate image and coordinates
                 image = x[:, :3]  # Assuming first 3 channels are RGB
                 coords = x[:, 3:].detach()  # Coordinates channels, detached from gradient computation
@@ -409,7 +400,7 @@ class EBMUNet(torch.nn.Module):
                 logits_logsumexp = logits.logsumexp(1)
 
                 if self.training:
-                    x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True)[0]
+                    x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True, retain_graph=True)[0]
                 else:
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
 

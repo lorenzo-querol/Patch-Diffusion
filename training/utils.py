@@ -20,8 +20,7 @@ def evaluate(net, dataloader, device):
 
     with torch.no_grad():
         for i, (images, labels) in enumerate(dataloader):
-            images = images.to(device).to(torch.float32) / 127.5 - 1
-            labels = labels.to(device)
+            images, labels = images.to(device), labels.to(device)
             patches, x_pos = get_patches(images, images.shape[-1])
             t_cls = np.random.choice(1, size=(images.shape[0],))
             t_cls = torch.from_numpy(t_cls).long().to(device)
