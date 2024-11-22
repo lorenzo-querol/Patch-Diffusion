@@ -183,11 +183,17 @@ class GaussianDiffusion:
             noise: If specified, the specific Gaussian noise to try to remove.
         """
 
+        def mean_flat(tensor):
+            """
+            Take the mean over all non-batch dimensions.
+            """
+            return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
         if noise is None:
             noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise=noise)
 
         score = net(x_t, t, **net_kwargs)
+        loss = mean_flat((noise[:, :3] - score) ** 2)
 
-        loss = torch.mean((noise[:, :3] - score) ** 2)
         return loss

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from diffusers import AutoencoderKL
 from calibration.ece import ECELoss
+from training.resample import UniformSampler
 from .patch import get_patches
 from .utils import evaluate, initialize, set_requires_grad
 
@@ -209,29 +210,25 @@ def fit(
     criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=0.2)
     ece_criterion = ECELoss()
 
+    # Schedule sampler
+    schedule_sampler = UniformSampler(diffusion)
+
     while True:
         # Accumulate gradients
         optimizer.zero_grad(set_to_none=True)
         patch_size = int(np.random.choice(patch_list, p=p_list))
         batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
 
-        images, _ = get_batch_data(dataset_iterator, batch_mul, device)
-        cls_images, cls_labels = get_batch_data(cls_dataset_iterator, batch_mul, device)
-
-        # Encode images to latents if needed
-        # images = encode_images_to_latents(train_on_latents, img_vae, latent_scale_factor, images)
-
-        # Sample randomized timesteps
-        timesteps = torch.randint(0, diffusion.num_timesteps, (images.shape[0],), device=device)
-
         L = 0
 
         if ce_weight > 0:
-            sqrt_alphas_cumprod = torch.from_numpy(diffusion.sqrt_alphas_cumprod).to(device)[timesteps].float()
-
             # Return full-size images and positions
+            cls_images, cls_labels = get_batch_data(cls_dataset_iterator, batch_mul, device)
             patches, x_pos = get_patches(cls_images, img_resolution)
             x_in = torch.cat([patches, x_pos], dim=1)
+
+            timesteps, weights = schedule_sampler.sample(x_in.shape[0], device)
+            sqrt_alphas_cumprod = torch.from_numpy(diffusion.sqrt_alphas_cumprod).to(device)[timesteps].float()
 
             logits = ddp(x_in, timesteps, class_labels=cls_labels, cls_mode=True)
 
@@ -246,8 +243,15 @@ def fit(
 
             L += cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul)
 
+        # Return patch-size images and positions
+        images, _ = get_batch_data(dataset_iterator, batch_mul, device)
+        # images = encode_images_to_latents(train_on_latents, img_vae, latent_scale_factor, images)
         patches, x_pos = get_patches(images, patch_size)
-        mse_loss = diffusion.training_losses(net=ddp, x_start=torch.cat([patches, x_pos], dim=1), t=timesteps)
+        x_in = torch.cat([patches, x_pos], dim=1)
+
+        timesteps, weights = schedule_sampler.sample(x_in.shape[0], device)
+        mse_loss = diffusion.training_losses(net=ddp, x_start=x_in, t=timesteps)
+        mse_loss = (mse_loss * weights).mean()
 
         training_stats.report("train/loss", mse_loss)
 
@@ -258,7 +262,6 @@ def fit(
         # Update weights
         for g in optimizer.param_groups:
             g["lr"] = optimizer_kwargs["lr"] * min(cur_nimg / max(lr_rampup_kimg * 1000, 1e-8), 1)
-
         optimizer.step()
 
         # Update EMA
