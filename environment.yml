@@ -22,3 +22,4 @@ dependencies:
     - imageio-ffmpeg>=0.4.3
     - pyspng
     - medmnist
+    # - netcal
