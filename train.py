@@ -61,6 +61,7 @@ def parse_int_list(s):
 @click.option("--batch-gpu", help="Limit batch size per GPU", metavar="INT", type=click.IntRange(min=1))
 @click.option("--channel_mult", help="Channel multiplier  [default: varies]", metavar="LIST", type=parse_int_list)
 @click.option("--model_channels", help="Channels per resolution  [default: varies]", metavar="INT", type=int)
+@click.option("--num_blocks", help="Number of residual blocks", metavar="INT", type=click.IntRange(min=1), default=2, show_default=True)
 @click.option("--attn_resolutions", help="Resolutions to use attention layers", metavar="LIST", type=parse_int_list)
 @click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
 @click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=10e-4, show_default=True)
@@ -72,6 +73,7 @@ def parse_int_list(s):
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
+@click.option("--label_smooth", help="Label smoothing", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
 @click.option("--eval_interval", help="How often to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
 
 # Performance-related.
@@ -102,14 +104,28 @@ def main(**kwargs):
     # Dataset/loader options
     c.dataset_kwargs = get_dataset_kwargs(opts.train_dir)
     c.val_dataset_kwargs = get_dataset_kwargs(opts.val_dir)
-    c.dataloader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=4)
+    c.dataloader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=4, shuffle=False)
 
     c.network_kwargs = dnnlib.EasyDict(
         class_name="training.networks.EBMUNet",
         model_channels=opts.model_channels,
-        channel_mult=opts.channel_mult,
+        num_blocks=opts.num_blocks,
         attn_resolutions=opts.attn_resolutions,
         dropout_rate=opts.dropout_rate,
+        channel_mult=opts.channel_mult,
+        conv_resample=True,
+        dims=2,
+        use_checkpoint=False,
+        num_heads=4,
+        num_head_channels=64,
+        num_heads_upsample=-1,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        use_new_attention_order=True,
+        context_dim=512,
+        use_spatial_transformer=True,
+        transformer_depth=1,
+        pool="sattn",
     )
     c.diffusion_kwargs = dnnlib.EasyDict(
         class_name="training.diffusion.GaussianDiffusion",

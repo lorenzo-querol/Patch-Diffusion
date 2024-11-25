@@ -7,15 +7,21 @@ import time
 import numpy as np
 import torch
 from diffusers import AutoencoderKL
-from calibration.ece import ECELoss
+from calibration.ece import ECE
 from training.resample import UniformSampler
 from .patch import get_patches
 from .utils import evaluate, initialize, set_requires_grad
-
+from torch.utils.data import DataLoader
 import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import misc, training_stats
 from torchvision import transforms
+
+
+def cycle(dataloader):
+    while True:
+        for data in dataloader:
+            yield data
 
 
 def get_patch_size_list(img_resolution, real_p, train_on_latents):
@@ -63,8 +69,15 @@ def encode_images_to_latents(img_vae, images, latent_scale_factor: float, train_
     return images
 
 
-def get_batch_data(dataset_iterator, batch_mul, device):
+def get_batch_data(dataset_iterator, device, batch_mul=1):
+    """Get a batch of data from the dataset iterator.
+
+    :param dataset_iterator: The dataset iterator.
+    :param device: The device to move the data to.
+    :param batch_mul: The number of batches to get from the iterator. Default is 1.
+    """
     images, labels = [], []
+
     for _ in range(batch_mul):
         images_, labels_ = next(dataset_iterator)
         images.append(images_), labels.append(labels_)
@@ -80,8 +93,8 @@ def fit(
     network_kwargs={},  # Options for model
     diffusion_kwargs={},  # Options for diffusion
     optimizer_kwargs={},  # Options for optimizer.
-    augment_kwargs=None,  # Options for augmentation.
     ce_weight=1.0,  # Weight of the classification loss.
+    label_smooth=0.0,  # Label smoothing factor.
     seed=0,  # Global random seed.
     batch_size=512,  # Total batch size for one training iteration.
     batch_gpu=None,  # Limit batch size per GPU, None = no limit.
@@ -137,17 +150,13 @@ def fit(
     )
 
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs, transform=val_transform)
-    dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
-    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **dataloader_kwargs))
+    dataloader = cycle(DataLoader(dataset=dataset_obj, batch_size=batch_gpu, drop_last=True, **dataloader_kwargs))
 
     cls_dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs, transform=train_transform)
-    cls_dataset_sampler = misc.InfiniteSampler(dataset=cls_dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
-    cls_dataset_iterator = iter(torch.utils.data.DataLoader(dataset=cls_dataset_obj, sampler=cls_dataset_sampler, batch_size=batch_gpu, **dataloader_kwargs))
+    cls_dataloader = cycle(DataLoader(dataset=cls_dataset_obj, batch_size=batch_gpu, drop_last=True, **dataloader_kwargs))
 
     val_dataset_obj = dnnlib.util.construct_class_by_name(**val_dataset_kwargs, transform=val_transform)
-    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **dataloader_kwargs)
-
-    augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None
+    val_dataloader = DataLoader(dataset=val_dataset_obj, batch_size=batch_gpu, **dataloader_kwargs)
 
     # if train_on_latents:
     #     img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
@@ -161,7 +170,12 @@ def fit(
     # Construct network
     dist.print0("Constructing network...")
     net_input_channels = img_channels + 2
-    interface_kwargs = dict(img_resolution=img_resolution, in_channels=net_input_channels, out_channels=dataset_obj.label_dim, label_dim=dataset_obj.label_dim)
+    interface_kwargs = dict(
+        img_resolution=img_resolution,
+        in_channels=net_input_channels,
+        out_channels=dataset_obj.label_dim,
+        label_dim=dataset_obj.label_dim,
+    )
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)  # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
     diffusion = dnnlib.util.construct_class_by_name(**diffusion_kwargs)  # subclass of training.diffusion.GaussianDiffusion
@@ -207,23 +221,20 @@ def fit(
     p_list, patch_list, batch_mul_dict, batch_mul_avg = get_patch_size_list(img_resolution, real_p, train_on_latents)
 
     # Classification-related
-    criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=0.2)
-    ece_criterion = ECELoss()
+    criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=label_smooth)
+    ece_criterion = ECE()
 
     # Schedule sampler
     schedule_sampler = UniformSampler(diffusion)
 
     while True:
-        # Accumulate gradients
         optimizer.zero_grad(set_to_none=True)
-        patch_size = int(np.random.choice(patch_list, p=p_list))
-        batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
 
         L = 0
 
         if ce_weight > 0:
             # Return full-size images and positions
-            cls_images, cls_labels = get_batch_data(cls_dataset_iterator, batch_mul, device)
+            cls_images, cls_labels = get_batch_data(cls_dataloader, device)
             patches, x_pos = get_patches(cls_images, img_resolution)
             x_in = torch.cat([patches, x_pos], dim=1)
 
@@ -232,19 +243,25 @@ def fit(
 
             logits = ddp(x_in, timesteps, class_labels=cls_labels, cls_mode=True)
 
-            ce_loss = criterion(logits, cls_labels.argmax(dim=1))
+            cls_labels = cls_labels.argmax(dim=1)
+            ce_loss = criterion(logits, cls_labels)
             cls_loss = ce_weight * (ce_loss * sqrt_alphas_cumprod).mean()
-            cls_acc = (logits.argmax(dim=1) == cls_labels.argmax(dim=1)).float().mean()
-            cls_ece = ece_criterion(logits, cls_labels.argmax(dim=1))
+            cls_acc = (logits.argmax(dim=1) == cls_labels).float().mean()
+
+            # ECE computation
+            probs = torch.nn.functional.softmax(logits, dim=1)
+            cls_ece = ece_criterion.measure(probs.cpu().detach().numpy(), cls_labels.cpu().detach().numpy())
 
             training_stats.report("train/cls_acc", cls_acc)
             training_stats.report("train/cls_loss", cls_loss)
             training_stats.report("train/cls_ece", cls_ece)
 
-            L += cls_loss.sum().mul(loss_scaling / batch_gpu_total / batch_mul)
+            L += cls_loss.sum().mul(loss_scaling / batch_gpu_total)
 
         # Return patch-size images and positions
-        images, _ = get_batch_data(dataset_iterator, batch_mul, device)
+        patch_size = int(np.random.choice(patch_list, p=p_list))
+        batch_mul = batch_mul_dict[patch_size] // batch_mul_dict[img_resolution]
+        images, _ = get_batch_data(dataloader, device, batch_mul=batch_mul)
         # images = encode_images_to_latents(train_on_latents, img_vae, latent_scale_factor, images)
         patches, x_pos = get_patches(images, patch_size)
         x_in = torch.cat([patches, x_pos], dim=1)
@@ -304,7 +321,7 @@ def fit(
         if ce_weight > 0:
             fields += [f"cls_loss {cls_loss.mean().item():<5.5f}"]
             fields += [f"cls_acc {cls_acc.item():<5.5f}"]
-            fields += [f"cls_ece {cls_ece.item():<5.5f}"]
+            fields += [f"cls_ece {cls_ece:<5.5f}"]
 
         fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
@@ -319,7 +336,7 @@ def fit(
 
         # Save network snapshot.
         if (snapshot_ticks is not None) and (done or cur_tick % snapshot_ticks == 0):
-            data = dict(ema=ema, augment_pipe=augment_pipe, dataset_kwargs=dict(dataset_kwargs))
+            data = dict(ema=ema, dataset_kwargs=dict(dataset_kwargs))
             for key, value in data.items():
                 if isinstance(value, torch.nn.Module):
                     value = copy.deepcopy(value).eval().requires_grad_(False)

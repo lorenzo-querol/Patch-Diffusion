@@ -51,7 +51,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 # ----------------------------------------------------------------------------
 
 
-def save_dataset(images, labels, dest, transform_image, dataset_name):
+def save_dataset(images, labels, dest, dataset_name):
     print(f"Saving dataset to {dest}")
     dest = dest.replace(".zip", "")
 
@@ -77,9 +77,8 @@ def save_dataset(images, labels, dest, transform_image, dataset_name):
         archive_fname = f"img{idx_str}.png"
         file_path = os.path.join(dest, archive_fname)
 
-        img = transform_image(img)
         if img is not None:
-            channels = img.shape[2] if img.ndim == 3 else 1
+            channels = img.shape[0]
             img = PIL.Image.fromarray(img, {1: "L", 3: "RGB"}[channels])
             img.save(file_path, format="png", optimize=False)
 
@@ -107,9 +106,9 @@ def process_medmnist(dataset_name: str, resolution: int, output_dir: str):
     transform = transforms.Compose([transforms.ToTensor()])
 
     # Load datasets
-    train_dataset = DataClass(split="train", transform=transform, download=True, size=resolution[0], mmap_mode="r")
-    val_dataset = DataClass(split="val", transform=transform, download=True, size=resolution[0], mmap_mode="r")
-    test_dataset = DataClass(split="test", transform=transform, download=True, size=resolution[0], mmap_mode="r")
+    train_dataset = DataClass(split="train", transform=transform, download=True, size=resolution, mmap_mode="r")
+    val_dataset = DataClass(split="val", transform=transform, download=True, size=resolution, mmap_mode="r")
+    test_dataset = DataClass(split="test", transform=transform, download=True, size=resolution, mmap_mode="r")
 
     # Function to transform images for saving
     def transform_image(img):
@@ -139,15 +138,9 @@ def process_medmnist(dataset_name: str, resolution: int, output_dir: str):
 @click.option("--dataset", help="Dataset to download and process", required=True)
 @click.option("--dest", help="Output directory or archive name", metavar="PATH", type=str, required=True)
 @click.option("--transform", help="Input crop/resize mode", metavar="MODE", type=click.Choice(["center-crop", "center-crop-wide"]))
-@click.option("--resolution", help="Output resolution (e.g., 512x512)", metavar="WxH", type=str)
+@click.option("--resolution", help="Image size", type=int)
 @click.option("--val_ratio", help="Ratio of validation set (0.0-1.0). If 0 or None, no validation set is created", type=float, default=0.2)
-def main(dataset: str, dest: str, transform: Optional[str], resolution: Optional[str], val_ratio: Optional[float]):
-
-    # Parse resolution
-    if resolution is not None:
-        resolution = tuple(map(int, resolution.split("x")))
-    else:
-        resolution = (None, None)
+def main(dataset: str, dest: str, transform: Optional[str], resolution: Optional[int], val_ratio: Optional[float]):
 
     # Download dataset
     if dataset == "cifar10":
@@ -165,53 +158,34 @@ def main(dataset: str, dest: str, transform: Optional[str], resolution: Optional
         process_medmnist(dataset, resolution, dest)
         return
 
-    # Split datasets based on validation ratio
-    if val_ratio is None or val_ratio <= 0:
-        # No validation set
-        train_dataset = trainset
-        valid_dataset = None
-    else:
-        # Ensure val_ratio is within bounds
-        val_ratio = min(max(val_ratio, 0.0), 1.0)
-        train_size = int((1 - val_ratio) * len(trainset))
-        valid_size = len(trainset) - train_size
+    # Ensure val_ratio is within bounds
+    val_ratio = min(max(val_ratio, 0.0), 1.0)
+    train_size = int((1 - val_ratio) * len(trainset))
 
-        # Create indices for train/val split
-        indices = torch.randperm(len(trainset))
-        train_indices = indices[:train_size]
-        valid_indices = indices[train_size:]
+    # Create indices for train/val split
+    indices = torch.randperm(len(trainset))
+    train_indices = indices[:train_size]
+    valid_indices = indices[train_size:]
 
-        # Get actual data using indices
-        train_images = np.array([np.array(trainset[i][0]) for i in train_indices])
-        train_labels = np.array([trainset[i][1] for i in train_indices])
-        valid_images = np.array([np.array(trainset[i][0]) for i in valid_indices])
-        valid_labels = np.array([trainset[i][1] for i in valid_indices])
-
-    # Define transform function
-    def transform_image(img):
-        img = img.transpose(1, 2, 0)  # Convert from CHW to HWC
-        img = (img * 255).astype(np.uint8)  # Convert to uint8
-        img = PIL.Image.fromarray(img)
-        if transform == "center-crop":
-            img = img.crop((0, 0, resolution[0], resolution[1]))
-        elif transform == "center-crop-wide":
-            img = img.crop((0, 0, resolution[0], resolution[1]))
-        img = img.resize(resolution, PIL.Image.Resampling.LANCZOS)
-        return np.array(img)
+    # Get actual data using indices
+    train_images = np.array([np.array(trainset[i][0]) for i in train_indices])
+    train_labels = np.array([trainset[i][1] for i in train_indices])
+    valid_images = np.array([np.array(trainset[i][0]) for i in valid_indices])
+    valid_labels = np.array([trainset[i][1] for i in valid_indices])
 
     # Save train dataset
-    save_dataset(train_images, train_labels, os.path.join(dest, "train"), transform_image, "train")
+    save_dataset(train_images, train_labels, os.path.join(dest, "train"), "train")
 
     # Save validation dataset if it exists
     if val_ratio > 0:
-        save_dataset(valid_images, valid_labels, os.path.join(dest, "valid"), transform_image, "valid")
+        save_dataset(valid_images, valid_labels, os.path.join(dest, "valid"), "valid")
 
     # Convert test data to numpy arrays
     test_images = np.array([np.array(img) for img, _ in testset])
     test_labels = np.array([label for _, label in testset])
 
     # Save test dataset
-    save_dataset(test_images, test_labels, os.path.join(dest, "test"), transform_image, "test")
+    save_dataset(test_images, test_labels, os.path.join(dest, "test"), "test")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ name: edm
 channels:
   - pytorch
   - nvidia
+  - conda-forge
 dependencies:
   - python>=3.8, < 3.10  # package build failures on 3.10
   - numpy>=1.20
@@ -14,12 +15,12 @@ dependencies:
   - tqdm
   - imageio
   - matplotlib
-  - diffusers # added this line
   - pandas
-  - torchvision
+  - diffusers # added this line
+  - torchvision # added this line
+  - einops # added this line
   - pip
   - pip:
     - imageio-ffmpeg>=0.4.3
     - pyspng
     - medmnist
-    # - netcal

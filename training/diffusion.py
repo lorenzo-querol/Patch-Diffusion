@@ -176,11 +176,11 @@ class GaussianDiffusion:
     def training_losses(self, net, x_start, t, noise=None, net_kwargs={}):
         """Compute the training loss for the diffusion model.
 
-        Args:
-            net: Diffusion model
-            x_start: the [N x C x ...] tensor of inputs.
-            t: A batch of timesteps
-            noise: If specified, the specific Gaussian noise to try to remove.
+        :param net: Diffusion model.
+        :param x_start: the [N x C x ...] tensor of inputs.
+        :param t: A batch of timesteps.
+        :param noise: If specified, the specific Gaussian noise to try to remove.
+        :return loss: the training loss.
         """
 
         def mean_flat(tensor):
