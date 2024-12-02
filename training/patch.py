@@ -5,12 +5,12 @@ def get_patches(images, patch_size, padding=None):
     """Extract random patches of square `patch_size`
     from the input images and return them along with their positions.
 
-    Proposed in https://openreview.net/forum?id=iv2sTQtbst
+    Proposed in https://openreview.net/forum?id=iv2sTQtbst.
 
-    Args:
-        images: Input images of shape (batch_size, channels, resolution, resolution)
-        patch_size: Size of the patches to be extracted
-        padding: Padding to be added to the images before extracting patches
+    :param images: Input images of shape (batch_size, channels, resolution, resolution)
+    :param patch_size: Size of the patches to be extracted
+    :param padding: Padding to be added to the images before extracting patches
+    :return: Patches with positions of shape (batch_size, channels + 2, patch_size, patch_size)
     """
     device = images.device
     batch_size, resolution = images.size(0), images.size(2)
@@ -44,4 +44,4 @@ def get_patches(images, patch_size, padding=None):
     y_pos = (y_pos / (resolution - 1) - 0.5) * 2.0
     images_pos = torch.cat((x_pos, y_pos), dim=1)
 
-    return padded, images_pos
+    return torch.cat([padded, images_pos], dim=1)

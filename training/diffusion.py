@@ -4,6 +4,13 @@ import numpy as np
 import torch
 import math
 
+from tqdm import tqdm
+import torch.nn.functional as F
+
+
+def exists(x):
+    return x is not None
+
 
 def linear_beta_schedule(timesteps):
     """Linear schedule.
@@ -101,19 +108,6 @@ class GaussianDiffusion:
             res = res[..., None]
         return res.expand(broadcast_shape)
 
-    def q_mean_variance(self, x_start, t):
-        """Extracts the mean, and the variance at current timestep.
-
-        Args:
-            x_start: Initial sample (before the first diffusion step)
-            t: Current timestep
-        """
-        x_start_shape = torch.shape(x_start)
-        mean = self._extract(self.sqrt_alphas_cumprod, t, x_start_shape) * x_start
-        variance = self._extract(1.0 - self.alphas_cumprod, t, x_start_shape)
-        log_variance = self._extract(self.log_one_minus_alphas_cumprod, t, x_start_shape)
-        return mean, variance, log_variance
-
     def q_sample(self, x_start, t, noise):
         """Diffuse the data.
 
@@ -127,12 +121,40 @@ class GaussianDiffusion:
         x_start_shape = x_start.shape
         return self._extract(self.sqrt_alphas_cumprod, t, x_start_shape) * x_start + self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_start_shape) * noise
 
+    def mean_flat(self, tensor):
+        """
+        Take the mean over all non-batch dimensions.
+        """
+        return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+    def training_losses(self, net, x_start, t, noise=None, model_kwargs=None):
+        """Compute the training loss for the diffusion model.
+
+        :param net: Diffusion model.
+        :param x_start: the [N x C x ...] tensor of inputs.
+        :param t: A batch of timesteps.
+        :param noise: If specified, the specific Gaussian noise to try to remove.
+        :return loss: the training loss.
+        """
+
+        if noise is None:
+            noise = torch.randn_like(x_start)
+
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        x_t = self.q_sample(x_start, t, noise)
+        loss = F.mse_loss(net(x_t, t, **model_kwargs), noise)
+
+        return loss
+
     def predict_start_from_noise(self, x_t, t, noise):
-        x_t_shape = torch.shape(x_t)
+        x_t_shape = x_t.shape
         return self._extract(self.sqrt_recip_alphas_cumprod, t, x_t_shape) * x_t - self._extract(self.sqrt_recipm1_alphas_cumprod, t, x_t_shape) * noise
 
     def q_posterior(self, x_start, x_t, t):
-        """Compute the mean and variance of the diffusion posterior `q(x_{t-1} | x_t, x_0)`.
+        """Compute the mean and variance of the diffusion
+        posterior q(x_{t-1} | x_t, x_0).
 
         Args:
             x_start: Stating point(sample) for the posterior computation
@@ -142,7 +164,7 @@ class GaussianDiffusion:
             Posterior mean and variance at current timestep
         """
 
-        x_t_shape = torch.shape(x_t)
+        x_t_shape = x_t.shape
         posterior_mean = self._extract(self.posterior_mean_coef1, t, x_t_shape) * x_start + self._extract(self.posterior_mean_coef2, t, x_t_shape) * x_t
         posterior_variance = self._extract(self.posterior_variance, t, x_t_shape)
         posterior_log_variance_clipped = self._extract(self.posterior_log_variance_clipped, t, x_t_shape)
@@ -150,9 +172,8 @@ class GaussianDiffusion:
 
     def p_mean_variance(self, pred_noise, x, t, clip_denoised=True):
         x_recon = self.predict_start_from_noise(x, t=t, noise=pred_noise)
-
         if clip_denoised:
-            x_recon = torch.clip_by_value(x_recon, self.clip_min, self.clip_max)
+            x_recon = torch.clamp(x_recon, self.clip_min, self.clip_max)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
@@ -164,36 +185,11 @@ class GaussianDiffusion:
             pred_noise: Noise predicted by the diffusion model
             x: Samples at a given timestep for which the noise was predicted
             t: Current timestep
-            clip_denoised (bool): Whether to clip the predicted noise within the specified range or not.
+            clip_denoised (bool): Whether to clip the predicted noise
+                within the specified range or not.
         """
         model_mean, _, model_log_variance = self.p_mean_variance(pred_noise, x=x, t=t, clip_denoised=clip_denoised)
-        noise = torch.random.normal(shape=x.shape, dtype=x.dtype)
-
+        noise = torch.randn_like(x)
         # No noise when t == 0
-        nonzero_mask = torch.reshape(1 - torch.cast(torch.equal(t, 0), torch.float32), [torch.shape(x)[0], 1, 1, 1])
+        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * torch.exp(0.5 * model_log_variance) * noise
-
-    def training_losses(self, net, x_start, t, noise=None, net_kwargs={}):
-        """Compute the training loss for the diffusion model.
-
-        :param net: Diffusion model.
-        :param x_start: the [N x C x ...] tensor of inputs.
-        :param t: A batch of timesteps.
-        :param noise: If specified, the specific Gaussian noise to try to remove.
-        :return loss: the training loss.
-        """
-
-        def mean_flat(tensor):
-            """
-            Take the mean over all non-batch dimensions.
-            """
-            return tensor.mean(dim=list(range(1, len(tensor.shape))))
-
-        if noise is None:
-            noise = torch.randn_like(x_start)
-        x_t = self.q_sample(x_start, t, noise=noise)
-
-        score = net(x_t, t, **net_kwargs)
-        loss = mean_flat((noise[:, :3] - score) ** 2)
-
-        return loss

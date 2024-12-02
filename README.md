@@ -7,9 +7,7 @@ For CIFAR10/100 dataset, you can use the following commands.
 ```bash
 # Example: 20% of the training data will be used as validation set if val_ratio is set to 0.2
 python dataset_tool.py --dataset cifar10 \
-                       --dest data/cifar10 \
-                       --transform center-crop \
-                       --resolution 32 \
+                       --dest ./data \
                        --val_ratio 0.0
 ```
 
@@ -18,25 +16,23 @@ python dataset_tool.py --dataset cifar10 \
 You can train new models using `train.py`. For example with CIFAR10:
 
 ```shell
-CUDA_VISIBLE_DEVICES=0,1 \
-torchrun --standalone --nproc_per_node=2 train.py \
+accelerate launch train.py \
         --outdir=training-runs \
-        --train_dir=data/cifar10/train \
-        --val_dir=data/cifar10/valid \
+        --train_dir=./data/cifar10/train \
+        --val_dir=./data/cifar10/test \
         --batch_size=128 \
         --cond=1 \
-        --model_channels=192 \
-        --num_blocks=3 \
-        --channel_mult=1,2,2 \
+        --model_channels=128 \
+        --num_blocks=2 \
+        --channel_mult=1,2,2,2 \
         --attn_resolutions=16,8 \
         --dropout_rate=0.1 \
         --schedule_name=cosine \
         --timesteps=1000 \
-        --lr=1e-4 \
-        --ce_weight=0.001 \
+        --lr=2e-4 \
+        --ce_weight=0.0 \
         --label_smooth=0.2 \
-        --eval_interval=10 \
-        --real_p=0.5
+        --eval_interval=10
 ```
 
 You can train new baseline models using `train_wrn.py`. For example:
@@ -74,6 +70,25 @@ We follow the hyperparameter settings of EDM, and introduce two new parameters h
 - `--train_on_latents`: where to train on the Latent Diffusion latent space, instead of the pixel space. Note we trained our models on the latent space for 256x256 images. 
 
 ### Inference Patch Diffusion
+USE THIS!
+
+```shell
+python sample.py \
+        --out_dir=samples \
+        --train_dir=./data/cifar10/train \
+        --model_dir=training-runs/00022-run \
+        --batch_size=128 \
+        --cond=1 \
+        --num_samples=100 \
+        --classifier_scale=6.0 \
+        --model_channels=192 \
+        --num_blocks=3 \
+        --channel_mult=1,2,2 \
+        --attn_resolutions=16,8 \
+        --dropout_rate=0.1 \
+        --schedule_name=cosine \
+        --timesteps=1000
+```
 
 You can generate images using `generate.py`. For example:
 ```.bash

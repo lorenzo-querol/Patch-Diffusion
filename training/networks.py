@@ -413,148 +413,6 @@ class QKVAttention(nn.Module):
         return count_flops_attn(model, _x, y)
 
 
-# @persistence.persistent_class
-# class EBMUNet(torch.nn.Module):
-#     def __init__(
-#         self,
-#         img_resolution,  # Image resolution at input/output.
-#         in_channels,  # Number of color channels at input.
-#         out_channels,  # Number of color channels at output.
-#         label_dim=0,  # Number of class labels, 0 = unconditional.
-#         model_channels=192,  # Base multiplier for the number of channels.
-#         channel_mult=[1, 2, 3, 4],  # Per-resolution multipliers for the number of channels.
-#         channel_mult_emb=4,  # Multiplier for the dimensionality of the embedding vector.
-#         num_blocks=3,  # Number of residual blocks per resolution.
-#         attn_resolutions=[32, 16, 8],  # List of resolutions with self-attention.
-#         dropout_rate=0.10,  #  Dropout probability of intermediate activations.
-#     ):
-#         super().__init__()
-#         emb_channels = model_channels * channel_mult_emb
-#         init = dict(init_mode="kaiming_uniform", init_weight=np.sqrt(1 / 3), init_bias=np.sqrt(1 / 3))
-#         init_zero = dict(init_mode="kaiming_uniform", init_weight=0, init_bias=0)
-#         block_kwargs = dict(emb_channels=emb_channels, channels_per_head=64, dropout=dropout_rate, init=init, init_zero=init_zero)
-
-#         # Mapping.
-#         self.map_noise = PositionalEmbedding(num_channels=model_channels)
-#         self.map_layer0 = Linear(in_features=model_channels, out_features=emb_channels, **init)
-#         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
-#         self.label_dim = label_dim
-#         self.map_label = Linear(in_features=label_dim, out_features=emb_channels, bias=False, init_mode="kaiming_normal", init_weight=np.sqrt(label_dim)) if label_dim else None
-
-#         # Encoder.
-#         self.enc = torch.nn.ModuleDict()
-#         cout = in_channels
-#         for level, mult in enumerate(channel_mult):
-#             res = img_resolution >> level
-#             if level == 0:
-#                 cin = cout
-#                 cout = model_channels * mult
-#                 self.enc[f"{res}x{res}_conv"] = Conv2d(in_channels=cin, out_channels=cout, kernel=3, **init)
-#             else:
-#                 self.enc[f"{res}x{res}_down"] = UNetBlock(in_channels=cout, out_channels=cout, down=True, **block_kwargs)
-#             for idx in range(num_blocks):
-#                 cin = cout
-#                 cout = model_channels * mult
-#                 self.enc[f"{res}x{res}_block{idx}"] = UNetBlock(in_channels=cin, out_channels=cout, attention=(res in attn_resolutions), **block_kwargs)
-#         skips = [block.out_channels for block in self.enc.values()]
-
-#         # Decoder.
-#         self.dec = torch.nn.ModuleDict()
-#         for level, mult in reversed(list(enumerate(channel_mult))):
-#             res = img_resolution >> level
-#             if level == len(channel_mult) - 1:
-#                 self.dec[f"{res}x{res}_in0"] = UNetBlock(in_channels=cout, out_channels=cout, attention=True, **block_kwargs)
-#                 self.dec[f"{res}x{res}_in1"] = UNetBlock(in_channels=cout, out_channels=cout, **block_kwargs)
-#             else:
-#                 self.dec[f"{res}x{res}_up"] = UNetBlock(in_channels=cout, out_channels=cout, up=True, **block_kwargs)
-#             for idx in range(num_blocks + 1):
-#                 cin = cout + skips.pop()
-#                 cout = model_channels * mult
-#                 self.dec[f"{res}x{res}_block{idx}"] = UNetBlock(in_channels=cin, out_channels=cout, attention=(res in attn_resolutions), **block_kwargs)
-
-#         self.out = torch.nn.Sequential(
-#             GroupNorm(num_channels=cout),
-#             torch.nn.SiLU(),
-#             Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init_zero),
-#         )
-#         self.fc = SimpleAttentionPool2d()
-
-#     def forward(self, x, noise_labels, class_labels=None, augment_labels=None, cls_mode=False):
-#         """
-#         Forward pass with EBM functionality.
-#         Arguments:
-#             x:                  Input tensor
-#             noise_labels:       Timestep embeddings
-#             class_labels:       Optional class-conditioning
-#             augment_labels:     Optional augmentation labels
-#             cls_mode:           If True, runs in classification mode
-#         """
-#         if cls_mode:
-#             emb = self.map_noise(noise_labels)
-#             emb = silu(self.map_layer0(emb))
-#             emb = self.map_layer1(emb)
-
-#             y = torch.ones((x.shape[0], self.label_dim)).to(x.device)
-#             emb += self.map_label(y)
-
-#             # Encoder.
-#             skips = []
-#             for block in self.enc.values():
-#                 x = block(x, emb) if isinstance(block, UNetBlock) else block(x)
-#                 skips.append(x)
-
-#             # Decoder.
-#             for block in self.dec.values():
-#                 if x.shape[1] != block.in_channels:
-#                     x = torch.cat([x, skips.pop()], dim=1)
-#                 x = block(x, emb)
-
-#             x = self.out(x)
-#             return self.fc(x)
-#         else:
-#             with  torch.enable_grad():
-#                 # Noise embedding
-#                 emb = self.map_noise(noise_labels)
-#                 emb = silu(self.map_layer0(emb))
-#                 emb = self.map_layer1(emb)
-
-#                 if class_labels is not None:
-#                     emb += self.map_label(class_labels)
-
-#                 # Separate image and coordinates
-#                 image = x[:, :3]  # Assuming first 3 channels are RGB
-#                 coords = x[:, 3:].detach()  # Coordinates channels, detached from gradient computation
-
-#                 # Only make image require gradients
-#                 input_tensor = torch.autograd.Variable(image, requires_grad=True)
-
-#                 # Recombine for forward pass
-#                 x = torch.cat([input_tensor, coords], dim=1)
-
-#                 # Encoder.
-#                 skips = []
-#                 for block in self.enc.values():
-#                     x = block(x, emb) if isinstance(block, UNetBlock) else block(x)
-#                     skips.append(x)
-
-#                 # Decoder.
-#                 for block in self.dec.values():
-#                     if x.shape[1] != block.in_channels:
-#                         x = torch.cat([x, skips.pop()], dim=1)
-#                     x = block(x, emb)
-
-#                 # EBM gradient computation.
-#                 logits = self.out(x)
-#                 logits_logsumexp = logits.logsumexp(1)
-
-#                 if self.training:
-#                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True, retain_graph=True)[0]
-#                 else:
-#                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
-
-#                 return -1 * x_prime
-
-
 class EBMUNet(nn.Module):
     """
     The full U-Net model with attention and timestep embedding.
@@ -823,29 +681,30 @@ class EBMUNet(nn.Module):
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
         :param class_labels: an [N] Tensor of labels, if class-conditional.
+        :param cls_mode: if True, return the logits for classification.
         :return: an [N x C x ...] Tensor of outputs.
         """
-
-        # If class_labels is one-hot encoded, convert to class indices
-        if class_labels is not None and len(class_labels.shape) > 1:
-            class_labels = torch.argmax(class_labels, dim=1)
 
         if cls_mode:
             hs = []
             emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-            # class_labels = class_labels * 0 + self.label_dim
-            class_labels = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
-            context = self.label_emb(class_labels)
+
+            y = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
+            context = self.label_emb(y)
             context = context[:, None, ...]
 
             h = x.type(self.dtype)
+
             for module in self.input_blocks:
                 h = module(h, emb, context)
                 hs.append(h)
+
             h = self.middle_block(h, emb, context)
+
             for module in self.output_blocks:
                 h = torch.cat([h, hs.pop()], dim=1)
                 h = module(h, emb, context)
+
             h = h.type(x.dtype)
             logits = self.out(h)
 
@@ -857,38 +716,31 @@ class EBMUNet(nn.Module):
                 emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
                 if self.label_dim is not None:
                     if class_labels is None:
-                        class_labels = torch.zeros(x.shape[0]).long().to(x.device) * self.label_dim
+                        class_labels = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
                     context = self.label_emb(class_labels)
                     context = context[:, None, ...]
                 else:
                     context = None
 
-                image = x[:, :3]  # Assuming first 3 channels are RGB
-                coords = x[:, 3:].detach()  # Coordinates channels, detached from gradient computation
-                input_tensor = torch.autograd.Variable(image, requires_grad=True)  # Only compute gradients w.r.t. image
-
-                h = x.type(self.dtype)
-                h = torch.cat([input_tensor, coords], dim=1)
+                input_tensor = torch.autograd.Variable(x, requires_grad=True)
+                h = input_tensor.type(self.dtype)
 
                 for module in self.input_blocks:
                     h = module(h, emb, context)
                     hs.append(h)
+
                 h = self.middle_block(h, emb, context)
+
                 for module in self.output_blocks:
                     h = torch.cat([h, hs.pop()], dim=1)
                     h = module(h, emb, context)
+
                 h = h.type(x.dtype)
                 logits = self.out(h)
-
                 logits_logsumexp = logits.logsumexp(1)
 
                 if self.training:
-                    x_prime = torch.autograd.grad(
-                        logits_logsumexp.sum(),
-                        [input_tensor],
-                        create_graph=True,
-                        retain_graph=True,
-                    )[0]
+                    x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor], create_graph=True, retain_graph=True)[0]
                 else:
                     x_prime = torch.autograd.grad(logits_logsumexp.sum(), [input_tensor])[0]
 
