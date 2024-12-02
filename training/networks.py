@@ -420,7 +420,7 @@ class EBMUNet(nn.Module):
     :param in_channels: channels in the input Tensor.
     :param model_channels: base channel count for the model.
     :param out_channels: channels in the output Tensor.
-    :param num_blocks: number of residual blocks per downsample.
+    :param num_res_blocks: number of residual blocks per downsample.
     :param attn_resolutions: a collection of downsample rates at which attention will take place. May be a set, list, or tuple.
     :param dropout_rate: The dropout probability.
     :param channel_mult: channel multiplier for each level of the UNet.
@@ -446,7 +446,7 @@ class EBMUNet(nn.Module):
         in_channels,
         model_channels,
         out_channels,
-        num_blocks,
+        num_res_blocks,
         attn_resolutions,
         dropout_rate=0,
         channel_mult=(1, 2, 4, 8),
@@ -480,7 +480,7 @@ class EBMUNet(nn.Module):
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
-        self.num_blocks = num_blocks
+        self.num_res_blocks = num_res_blocks
         self.attn_resolutions = attn_resolutions
         self.dropout_rate = dropout_rate
         self.channel_mult = channel_mult
@@ -505,7 +505,7 @@ class EBMUNet(nn.Module):
         input_block_chans = [ch]
         ds = 1
         for level, mult in enumerate(channel_mult):
-            for _ in range(num_blocks):
+            for _ in range(num_res_blocks):
                 layers = [
                     ResBlock(
                         ch,
@@ -601,7 +601,7 @@ class EBMUNet(nn.Module):
 
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_blocks + 1):
+            for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock(
@@ -633,7 +633,7 @@ class EBMUNet(nn.Module):
                             context_dim=context_dim,
                         )
                     )
-                if level and i == num_blocks:
+                if level and i == num_res_blocks:
                     out_ch = ch
                     layers.append(
                         ResBlock(

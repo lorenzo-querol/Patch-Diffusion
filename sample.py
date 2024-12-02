@@ -42,7 +42,7 @@ def parse_int_list(s):
 @click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=512, show_default=True)
 @click.option("--channel_mult", help="Channel multiplier  [default: varies]", metavar="LIST", type=parse_int_list)
 @click.option("--model_channels", help="Channels per resolution  [default: varies]", metavar="INT", type=int)
-@click.option("--num_blocks", help="Number of residual blocks", metavar="INT", type=click.IntRange(min=1), default=2, show_default=True)
+@click.option("--num_res_blocks", help="Number of residual blocks", metavar="INT", type=click.IntRange(min=1), default=2, show_default=True)
 @click.option("--attn_resolutions", help="Resolutions to use attention layers", metavar="LIST", type=parse_int_list)
 @click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
 
@@ -61,7 +61,7 @@ def main(**kwargs):
     sampler_kwargs.network_kwargs = dnnlib.EasyDict(
         class_name="training.networks.EBMUNet",
         model_channels=opts.model_channels,
-        num_blocks=opts.num_blocks,
+        num_res_blocks=opts.num_res_blocks,
         attn_resolutions=opts.attn_resolutions,
         dropout_rate=opts.dropout_rate,
         channel_mult=opts.channel_mult,

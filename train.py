@@ -5,9 +5,9 @@ import warnings
 
 import click
 from accelerate import Accelerator
-import torch_utils.distributed as dist
 
 import dnnlib
+import torch_utils.distributed as dist
 from training import training_loop
 
 warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.
@@ -35,8 +35,7 @@ def parse_int_list(s):
 
 
 @click.command()
-
-# Patch options
+# Latent options.
 @click.option("--train_on_latents", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
 
 # Main options.
@@ -46,14 +45,13 @@ def parse_int_list(s):
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
 
 # Hyperparameters.
-@click.option("--duration", help="Training duration", metavar="MIMG", type=click.FloatRange(min=0, min_open=True), default=200, show_default=True)
-@click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=512, show_default=True)
+@click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=128, show_default=True)
 @click.option("--channel_mult", help="Channel multiplier  [default: varies]", metavar="LIST", type=parse_int_list)
 @click.option("--model_channels", help="Channels per resolution  [default: varies]", metavar="INT", type=int)
-@click.option("--num_blocks", help="Number of residual blocks", metavar="INT", type=click.IntRange(min=1), default=2, show_default=True)
+@click.option("--num_res_blocks", help="Number of residual blocks", metavar="INT", type=click.IntRange(min=1), default=2, show_default=True)
 @click.option("--attn_resolutions", help="Resolutions to use attention layers", metavar="LIST", type=parse_int_list)
-@click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
-@click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=10e-4, show_default=True)
+@click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), show_default=True)
+@click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1e-4, show_default=True)
 
 # Diffusion-related.
 @click.option("--schedule_name", help="Diffusion schedule", metavar="str", type=click.Choice(["linear", "cosine"]), show_default=True)
@@ -74,12 +72,20 @@ def main(**kwargs):
     trainer_kwargs = dnnlib.EasyDict()
 
     # Dataset/loader options
-    trainer_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
-    trainer_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
+    trainer_kwargs.dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.train_dir,
+    )
+    trainer_kwargs.val_dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.val_dir,
+    )
     trainer_kwargs.network_kwargs = dnnlib.EasyDict(
         class_name="training.networks.EBMUNet",
         model_channels=opts.model_channels,
-        num_blocks=opts.num_blocks,
+        num_res_blocks=opts.num_res_blocks,
         attn_resolutions=opts.attn_resolutions,
         dropout_rate=opts.dropout_rate,
         channel_mult=opts.channel_mult,
@@ -142,7 +148,11 @@ def main(**kwargs):
         with open(os.path.join(trainer_kwargs.run_dir, "training_options.json"), "wt") as f:
             json.dump(trainer_kwargs, f, indent=2)
 
-        dnnlib.util.Logger(file_name=os.path.join(trainer_kwargs.run_dir, "log.txt"), file_mode="a", should_flush=True)
+        dnnlib.util.Logger(
+            file_name=os.path.join(trainer_kwargs.run_dir, "log.txt"),
+            file_mode="a",
+            should_flush=True,
+        )
 
     trainer = training_loop.Trainer(**trainer_kwargs)
     trainer.train()

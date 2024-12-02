@@ -23,7 +23,7 @@ accelerate launch train.py \
         --batch_size=128 \
         --cond=1 \
         --model_channels=128 \
-        --num_blocks=2 \
+        --num_res_blocks=2 \
         --channel_mult=1,2,2,2 \
         --attn_resolutions=16,8 \
         --dropout_rate=0.1 \
@@ -82,7 +82,7 @@ python sample.py \
         --num_samples=100 \
         --classifier_scale=6.0 \
         --model_channels=192 \
-        --num_blocks=3 \
+        --num_res_blocks=3 \
         --channel_mult=1,2,2 \
         --attn_resolutions=16,8 \
         --dropout_rate=0.1 \

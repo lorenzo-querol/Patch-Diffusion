@@ -4,12 +4,14 @@ channels:
   - nvidia
   - conda-forge
 dependencies:
-  - python>=3.8, < 3.10  # package build failures on 3.10
-  - numpy>=1.20
-  - click>=8.0
-  - pillow>=8.3.1
-  - scipy>=1.7.1
-  - pytorch=1.12.1
+  - python
+  - numpy
+  - click
+  - pillow
+  - scipy
+  - pytorch
+  - pytorch-cuda=12.4 # added this line
+  - torchvision # added this line
   - psutil
   - requests
   - tqdm
@@ -17,10 +19,10 @@ dependencies:
   - matplotlib
   - pandas
   - diffusers # added this line
-  - torchvision # added this line
   - einops # added this line
   - accelerate # added this line
   - pip
   - pip:
-    - imageio-ffmpeg>=0.4.3
+    - imageio-ffmpeg
     - pyspng
+    - ema-pytorch>=0.4.2 # added this line
