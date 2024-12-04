@@ -32,7 +32,8 @@ accelerate launch train.py \
         --lr=2e-4 \
         --ce_weight=0.0 \
         --label_smooth=0.2 \
-        --eval_interval=10
+        --eval_interval=10 \
+        --resume_from=training-runs/00004-run
 ```
 
 You can train new baseline models using `train_wrn.py`. For example:

@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import math
 
-from tqdm import tqdm
 import torch.nn.functional as F
 
 
@@ -51,6 +50,24 @@ def get_beta_schedule(schedule_name, timesteps):
         return cosine_beta_schedule(timesteps)
     else:
         raise ValueError(f"Unknown schedule name: {schedule_name}")
+
+
+def extract(arr, timesteps, broadcast_shape):
+    """
+    Extract values from a 1-D numpy array for a batch of indices.
+
+    :param arr: the 1-D numpy array.
+    :param timesteps: a tensor of indices into the array to extract.
+    :param broadcast_shape: a larger shape of K dimensions with the batch
+                            dimension equal to the length of timesteps.
+    :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
+    """
+    timesteps = timesteps.to(torch.long)
+
+    res = torch.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    while len(res.shape) < len(broadcast_shape):
+        res = res[..., None]
+    return res.expand(broadcast_shape)
 
 
 class GaussianDiffusion:

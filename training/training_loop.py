@@ -1,29 +1,23 @@
-import copy
-import json
 import math
 import os
-import pickle
-import time
 
 import numpy as np
 import torch
-from diffusers import AutoencoderKL
 import torchvision
-from tqdm import tqdm
+from accelerate import Accelerator
+from accelerate.utils import set_seed
+from diffusers import AutoencoderKL
+from ema_pytorch import EMA
+from torch.utils.data import DataLoader
+from torchvision import transforms
+
+import dnnlib
 from calibration.ece import ECE
 from training.resample import UniformSampler
-from .patch import get_patches
-from .utils import set_requires_grad, cycle
-from torch.utils.data import DataLoader
-import dnnlib
-from torch_utils import distributed as dist
-from torch_utils import misc, training_stats
-from torchvision import transforms
-from accelerate import Accelerator
-from ema_pytorch import EMA
-from accelerate.utils import set_seed
+
 from .ece import ECELoss
-from torch.optim.lr_scheduler import OneCycleLR
+from .patch import get_patches
+from .utils import cycle
 
 
 def num_to_groups(num, divisor):
@@ -106,7 +100,9 @@ class Trainer:
         network_kwargs={},  # Model options
         diffusion_kwargs={},  # Diffusion options
         optimizer_kwargs={},  # Optimizer options
+        scheduler_kwargs={},  # Scheduler options
         num_steps=100_000,  # Number of training steps
+        lr_warmup=0,  # Number of warmup steps for the learning rate
         batch_size=128,  # Batch size
         ce_weight=0.001,  # Weight of the classification loss
         label_smooth=0.2,  # Label smoothing factor
@@ -121,8 +117,10 @@ class Trainer:
         self.network_kwargs = network_kwargs
         self.diffusion_kwargs = diffusion_kwargs
         self.optimizer_kwargs = optimizer_kwargs
+        self.scheduler_kwargs = scheduler_kwargs
 
         self.num_steps = num_steps
+        self.lr_warmup = lr_warmup
         self.ce_weight = ce_weight
         self.label_smooth = label_smooth
         self.real_p = real_p
@@ -130,13 +128,16 @@ class Trainer:
         self.seed = seed
         self.resume_from = resume_from
 
+        self.grad_accum_steps = 2
         self.batch_size = batch_size
+        self.per_device_batch_size = self.batch_size // self.grad_accum_steps
+        assert self.batch_size % self.grad_accum_steps == 0, "batch_size must be divisible by grad_accum_steps"
 
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
         self.cur_step = 0
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=2)
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb")
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self._init_trainer()
@@ -185,7 +186,7 @@ class Trainer:
         self.cls_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=augment_transform)
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         dataloader_kwargs = dict(
-            batch_size=self.batch_size,
+            batch_size=self.per_device_batch_size,
             drop_last=True,
             pin_memory=True,
             num_workers=4,
@@ -194,7 +195,7 @@ class Trainer:
         )
         self.train_dataloader = DataLoader(self.train_dataset, **dataloader_kwargs)
         self.cls_dataloader = DataLoader(self.cls_dataset, **dataloader_kwargs)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.per_device_batch_size, pin_memory=True, num_workers=4)
 
         self.train_dataloader, self.cls_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader,
@@ -202,7 +203,10 @@ class Trainer:
             self.val_dataloader,
         )
 
-        self.train_dataloader, self.cls_dataloader = cycle(self.train_dataloader), cycle(self.cls_dataloader)
+        self.train_dataloader, self.cls_dataloader = (
+            cycle(self.train_dataloader),
+            cycle(self.cls_dataloader),
+        )
 
     def _set_requires_grad(self, model, requires_grad):
         """Set requires_grad for all parameters in the model"""
@@ -229,25 +233,34 @@ class Trainer:
             self.ema = EMA(self.net)
 
         # ---------------------------------------------------------------------
-        """ Setup the optimizer and scheduler """
-        self.print_fn("Setting up optimizer and scheduler...")
+        """ Setup the optimizer """
+        self.print_fn("Setting up optimizer...")
+
+        def lambda_lr_warmup(step):
+            if self.lr_warmup == 0:
+                return 1.0
+
+            return min(1.0, step / self.lr_warmup)
+
         self.optimizer = dnnlib.util.construct_class_by_name(params=self.net.parameters(), **self.optimizer_kwargs)
+        self.scheduler = dnnlib.util.construct_class_by_name(optimizer=self.optimizer, lr_lambda=lambda_lr_warmup, **self.scheduler_kwargs)
 
         # ---------------------------------------------------------------------
         """ Prepare for distributed training """
-        self.net, self.optimizer = self.accelerator.prepare(
+        self.net, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.net,
             self.optimizer,
+            self.scheduler,
         )
 
         # BUG: Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to True!!
         self._set_requires_grad(self.net, True)
 
-    def train(self, print_interval=10, eval_interval=100, save_interval=1000):
+    def train(self, log_interval=10, eval_interval=100, save_interval=1000):
         """Main training loop.
 
         :param num_steps: Total number of training steps.
-        :param print_interval: How often to print metrics. Default is 10 steps.
+        :param log_interval: How often to print metrics. Default is 10 steps.
         :param eval_interval: When to evaluate the model. Default is 100 steps.
         :param save_interval: When to save the model. Default is 1000 steps.
         """
@@ -261,7 +274,7 @@ class Trainer:
             metrics = self._training_step()
             self._update_ema()
 
-            if self.cur_step % print_interval == 0:
+            if self.cur_step % log_interval == 0:
                 self.print_fn()
                 self.print_fn(f"Step {self.cur_step}/{self.num_steps}")
                 self._report_metrics(metrics)
@@ -272,7 +285,7 @@ class Trainer:
 
             if self.cur_step % save_interval == 0:
                 self._save()
-                self._sample_images(self.img_resolution, self.img_channels)
+                self._sample_images()
 
             self.cur_step += 1
 
@@ -283,59 +296,64 @@ class Trainer:
         self.ema.to(self.device)
         self.ema.update()
 
-    def _sample_images(self, img_size, img_channels, num_images=16):
+    def _sample_images(self, num_images=25):
         if not self.accelerator.is_main_process:
             return
 
-        self.ema.eval()
-
+        img_size, img_channels = self.img_resolution, self.img_channels
         samples = torch.randn((num_images, img_channels, img_size, img_size), device=self.device)
 
+        self.ema.eval()
         for t in reversed(range(0, self.diffusion.num_timesteps)):
-            tt = torch.full((num_images,), t, device=self.device, dtype=torch.long)
+            timesteps = torch.full((num_images,), t, device=self.device, dtype=torch.long)
 
             with torch.no_grad():
-                pred_noise = self.ema(samples, tt)
-                samples = self.diffusion.p_sample(pred_noise, samples, tt)
+                pred_noise = self.ema(samples, timesteps)
+                samples = self.diffusion.p_sample(pred_noise, samples, timesteps)
 
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
         torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
-
-        return samples
 
     def _training_step(self):
         loss = 0
         metrics = {}
 
-        self.optimizer.zero_grad(set_to_none=True)
+        if self.cur_step % self.grad_accum_steps == 0:
+            self.optimizer.zero_grad(set_to_none=True)
 
         # ---------------------------------------------------------------------
         """Classification Component"""
 
         if self.ce_weight > 0:
-            cls_images, cls_labels = next(self.cls_dataloader)
-            clean_images = cls_images
+            noised_images, cls_labels = next(self.cls_dataloader)
+            clean_images = noised_images
 
-            t_noised, _ = self.schedule_sampler.sample(cls_images.shape[0], self.device)
-            t_clean = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
+            t_noised, _ = self.schedule_sampler.sample(noised_images.shape[0], self.device)
+            t_clean = torch.zeros(clean_images.shape[0], dtype=torch.long, device=self.device)
 
-            images_all = torch.cat([cls_images, clean_images])
-            timesteps_all = torch.cat([t_noised, t_clean])
+            # images_all = torch.cat([noised_images, clean_images])
+            # timesteps_all = torch.cat([t_noised, t_clean])
+            # labels_all = torch.cat([cls_labels, cls_labels]).argmax(dim=1)
+            images_all = noised_images
+            timesteps_all = t_noised
+            labels_all = cls_labels.argmax(dim=1)
             sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps_all].float()
 
-            logits = self.net(images_all, timesteps_all, cls_mode=True)
+            with self.accelerator.no_sync(self.net):
+                logits = self.net(images_all, timesteps_all, cls_mode=True)
 
-            cls_labels = torch.cat([cls_labels, cls_labels]).argmax(dim=1)
-            ce_loss = self.criterion(logits, cls_labels)
-            cls_loss = (ce_loss * sqrt_alphas_cumprod).mean()
-            cls_acc = (logits.argmax(dim=1) == cls_labels).float().mean()
-            cls_ece = self.ece_criterion(logits, cls_labels)
+                ce_loss = self.criterion(logits, labels_all)
+                cls_loss = (ce_loss * sqrt_alphas_cumprod).mean()
+                cls_acc = (logits.argmax(dim=1) == labels_all).float().mean()
+                cls_ece = self.ece_criterion(logits, labels_all)
 
-            metrics["cls_loss"] = cls_loss
-            metrics["cls_acc"] = cls_acc
-            metrics["cls_ece"] = cls_ece
+                metrics["cls_loss"] = cls_loss
+                metrics["cls_acc"] = cls_acc
+                metrics["cls_ece"] = cls_ece
 
-            loss += self.ce_weight * cls_loss
+                # loss += self.ce_weight * cls_loss
+
+                self.accelerator.backward((self.ce_weight * cls_loss) / self.grad_accum_steps)
 
         # ---------------------------------------------------------------------
         """ Diffusion Component """
@@ -356,20 +374,22 @@ class Trainer:
         mse_loss = (mse_loss * weights).mean()
         metrics["mse_loss"] = mse_loss
 
-        loss += mse_loss
+        # loss += mse_loss
 
         # ---------------------------------------------------------------------
         """ Backward pass and optimizer step """
 
-        self.accelerator.backward(loss)
-        self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+        # self.accelerator.backward(loss / self.grad_accum_steps)
+        self.accelerator.backward(mse_loss / self.grad_accum_steps)
 
-        self.accelerator.wait_for_everyone()
-        self.optimizer.step()
-        self.accelerator.wait_for_everyone()
+        if (self.cur_step + 1) % self.grad_accum_steps == 0:
+            self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+            self.optimizer.step()
+            self.scheduler.step()
+            self.accelerator.wait_for_everyone()
 
         # ---------------------------------------------------------------------
-        """ Compute gradients """
+        """ Compute gradients and other monioring metrics """
 
         grad_norm = 0.0
         for p in self.net.parameters():
@@ -385,41 +405,27 @@ class Trainer:
         metrics["grad_norm"] = grad_norm
         metrics["param_norm"] = param_norm
 
+        metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
+
         return metrics
 
     def _evaluate(self):
-        metrics = {}
-        all_losses, all_accs, all_eces = [], [], []
-
         self.net.eval()
+        metrics = {"val_cls_loss": [], "val_cls_acc": [], "val_cls_ece": []}
 
         with torch.no_grad():
             for images, labels in self.val_dataloader:
-                images, labels = images.to(self.device), labels.to(self.device)
-                timesteps = torch.zeros(images.shape[0], dtype=torch.long, device=self.device)
+                images, labels = images.to(self.device), labels.to(self.device).argmax(dim=1)
 
-                logits = self.net(images, timesteps, cls_mode=True)
+                clean_timesteps = torch.zeros(images.shape[0], dtype=torch.long, device=self.device)
+                logits = self.net(images, clean_timesteps, cls_mode=True)
 
-                labels = labels.argmax(dim=1)
-                ce_loss = torch.nn.functional.cross_entropy(logits, labels)
-                acc = (logits.argmax(dim=1) == labels).float().mean()
-                ece = self.ece_criterion(logits, labels)
-
-                all_losses.append(ce_loss)
-                all_accs.append(acc)
-                all_eces.append(ece)
+                metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
+                metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
+                metrics["val_cls_ece"].append(self.ece_criterion(logits, labels))
 
         self.net.train()
-
-        all_losses = torch.stack(all_losses)
-        all_accs = torch.stack(all_accs)
-        all_eces = torch.stack(all_eces)
-
-        metrics["val_cls_loss"] = all_losses.mean()
-        metrics["val_cls_acc"] = all_accs.mean()
-        metrics["val_cls_ece"] = all_eces.mean()
-
-        return metrics
+        return {k: torch.stack(v).mean() for k, v in metrics.items()}
 
     def _report_metrics(self, metrics: dict):
         """
@@ -449,23 +455,32 @@ class Trainer:
             "step": self.cur_step,
             "net": self.accelerator.unwrap_model(self.net).state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
             "ema": self.ema.state_dict(),
         }
 
         torch.save(data, os.path.join(self.run_dir, f"model-{self.cur_step:06d}.pt"))
 
     def _load(self):
-        pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
-        latest_ckpt = os.path.join(self.resume_from, pt_files[-1])
+        """Either load the latest checkpoint from the directory or load the checkpoint from the file
 
-        data = torch.load(latest_ckpt, map_location=self.device, weights_only=True)
+        :params resume_from: The directory or the file to resume from. If it is a directory, the latest
+        checkpoint will be loaded. Else, the specified file will be loaded.
+        """
+        if not self.resume_from.endswith(".pt"):
+            pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
+            ckpt = os.path.join(self.resume_from, pt_files[-1])
+        else:
+            ckpt = self.resume_from
 
-        self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
-        self.optimizer.load_state_dict(data["optimizer"])
-        self.ema.load_state_dict(data["ema"])
+        self.print_fn(f"Resuming from {ckpt}...")
 
-        if not all(param.requires_grad for param in self.net.parameters()):
-            self.print_fn("Some parameters in the model are not trainable. Setting all parameters to trainable...")
-            self._set_requires_grad(self.net, True)
+        data = torch.load(ckpt, map_location=self.device, weights_only=True)
 
         self.cur_step = data["step"]
+        self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
+        self.optimizer.load_state_dict(data["optimizer"])
+        self.scheduler.load_state_dict(data["scheduler"])
+
+        if self.accelerator.is_main_process:
+            self.ema.load_state_dict(data["ema"])

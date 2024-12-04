@@ -661,18 +661,11 @@ class EBMUNet(nn.Module):
 
         self.pool = pool
         if pool == "adaptive":
-            self.fc = nn.Sequential(
-                nn.AdaptiveAvgPool2d((1, 1)),
-                nn.Flatten(),
-            )
+            self.fc = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
         elif pool == "attn":
-            self.fc = nn.Sequential(
-                AttentionPool2d(img_resolution, out_channels, out_channels, label_dim),
-            )
+            self.fc = nn.Sequential(AttentionPool2d(img_resolution, out_channels, out_channels, label_dim))
         elif pool == "sattn":
-            self.fc = nn.Sequential(
-                SimpleAttentionPool2d(),
-            )
+            self.fc = nn.Sequential(SimpleAttentionPool2d())
 
     def forward(self, x, timesteps, class_labels=None, cls_mode=False):
         """
