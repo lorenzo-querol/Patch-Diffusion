@@ -10,6 +10,7 @@ from diffusers import AutoencoderKL
 from ema_pytorch import EMA
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from tqdm import tqdm
 
 import dnnlib
 from calibration.ece import ECE
@@ -18,15 +19,6 @@ from training.resample import UniformSampler
 from .ece import ECELoss
 from .patch import get_patches
 from .utils import cycle
-
-
-def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
-    if remainder > 0:
-        arr.append(remainder)
-    return arr
 
 
 def get_patch_size_list(img_resolution, real_p, train_on_latents):
@@ -101,7 +93,7 @@ class Trainer:
         diffusion_kwargs={},  # Diffusion options
         optimizer_kwargs={},  # Optimizer options
         scheduler_kwargs={},  # Scheduler options
-        num_steps=100_000,  # Number of training steps
+        num_epochs=100,  # Number of training steps
         lr_warmup=0,  # Number of warmup steps for the learning rate
         batch_size=128,  # Batch size
         ce_weight=0.001,  # Weight of the classification loss
@@ -119,7 +111,7 @@ class Trainer:
         self.optimizer_kwargs = optimizer_kwargs
         self.scheduler_kwargs = scheduler_kwargs
 
-        self.num_steps = num_steps
+        self.num_epochs = num_epochs
         self.lr_warmup = lr_warmup
         self.ce_weight = ce_weight
         self.label_smooth = label_smooth
@@ -127,17 +119,13 @@ class Trainer:
         self.train_on_latents = train_on_latents
         self.seed = seed
         self.resume_from = resume_from
-
-        self.grad_accum_steps = 2
         self.batch_size = batch_size
-        self.per_device_batch_size = self.batch_size // self.grad_accum_steps
-        assert self.batch_size % self.grad_accum_steps == 0, "batch_size must be divisible by grad_accum_steps"
+        self.cur_epoch = 0
 
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.cur_step = 0
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb")
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=4)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self._init_trainer()
@@ -186,7 +174,7 @@ class Trainer:
         self.cls_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=augment_transform)
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         dataloader_kwargs = dict(
-            batch_size=self.per_device_batch_size,
+            batch_size=self.batch_size,
             drop_last=True,
             pin_memory=True,
             num_workers=4,
@@ -195,7 +183,7 @@ class Trainer:
         )
         self.train_dataloader = DataLoader(self.train_dataset, **dataloader_kwargs)
         self.cls_dataloader = DataLoader(self.cls_dataset, **dataloader_kwargs)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.per_device_batch_size, pin_memory=True, num_workers=4)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
         self.train_dataloader, self.cls_dataloader, self.val_dataloader = self.accelerator.prepare(
             self.train_dataloader,
@@ -203,10 +191,7 @@ class Trainer:
             self.val_dataloader,
         )
 
-        self.train_dataloader, self.cls_dataloader = (
-            cycle(self.train_dataloader),
-            cycle(self.cls_dataloader),
-        )
+        self.cls_dataloader = cycle(self.cls_dataloader)
 
     def _set_requires_grad(self, model, requires_grad):
         """Set requires_grad for all parameters in the model"""
@@ -256,39 +241,6 @@ class Trainer:
         # BUG: Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to True!!
         self._set_requires_grad(self.net, True)
 
-    def train(self, log_interval=10, eval_interval=100, save_interval=1000):
-        """Main training loop.
-
-        :param num_steps: Total number of training steps.
-        :param log_interval: How often to print metrics. Default is 10 steps.
-        :param eval_interval: When to evaluate the model. Default is 100 steps.
-        :param save_interval: When to save the model. Default is 1000 steps.
-        """
-
-        self.print_fn(f"Training for {self.num_steps - self.cur_step} steps...")
-        self.print_fn("")
-
-        self.accelerator.init_trackers(project_name="EGC")
-
-        while self.cur_step < self.num_steps:
-            metrics = self._training_step()
-            self._update_ema()
-
-            if self.cur_step % log_interval == 0:
-                self.print_fn()
-                self.print_fn(f"Step {self.cur_step}/{self.num_steps}")
-                self._report_metrics(metrics)
-
-            if self.ce_weight > 0 and self.cur_step % eval_interval == 0:
-                metrics = self._evaluate()
-                self._report_metrics(metrics)
-
-            if self.cur_step % save_interval == 0:
-                self._save()
-                self._sample_images()
-
-            self.cur_step += 1
-
     def _update_ema(self):
         if not self.accelerator.is_main_process:
             return
@@ -312,102 +264,129 @@ class Trainer:
                 samples = self.diffusion.p_sample(pred_noise, samples, timesteps)
 
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
-        torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
+        torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_epoch}.png"))
 
-    def _training_step(self):
-        loss = 0
+    def train(self, eval_interval=5, save_interval=10):
+        """Main training loop.
+
+        :param num_epochs: Total number of training epochs.
+        :param log_interval: How often to print metrics. Default is 1 epoch.
+        :param eval_interval: When to evaluate the model. Default is 1 epoch.
+        :param save_interval: When to save the model. Default is 1 epoch.
+        """
+
+        self.print_fn(f"Training for {self.num_epochs - self.cur_epoch} epochs...")
+        self.print_fn("")
+
+        self.accelerator.init_trackers(project_name="EGC")
+
+        for epoch in range(self.cur_epoch, self.num_epochs):
+            self.cur_epoch = epoch
+
+            metrics = self._training_epoch()
+            self._report_metrics(metrics)
+
+            if self.ce_weight > 0 and epoch % eval_interval == 0:
+                metrics = self._evaluate()
+                self._report_metrics(metrics)
+
+            if epoch % save_interval == 0:
+                self._save()
+                self._sample_images()
+
+    def _training_epoch(self):
+        self.net.train()
         metrics = {}
+        metric_sums = {}
 
-        if self.cur_step % self.grad_accum_steps == 0:
-            self.optimizer.zero_grad(set_to_none=True)
+        pbar = tqdm(self.train_dataloader, desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_main_process)
 
-        # ---------------------------------------------------------------------
-        """Classification Component"""
+        for images, labels in pbar:
+            with self.accelerator.accumulate(self.net):
+                self.optimizer.zero_grad(set_to_none=True)
 
-        if self.ce_weight > 0:
-            noised_images, cls_labels = next(self.cls_dataloader)
-            clean_images = noised_images
+                if self.ce_weight > 0:
+                    batch = next(self.cls_dataloader)
+                    cls_clean = batch[0]
 
-            t_noised, _ = self.schedule_sampler.sample(noised_images.shape[0], self.device)
-            t_clean = torch.zeros(clean_images.shape[0], dtype=torch.long, device=self.device)
+                    t_noised, _ = self.schedule_sampler.sample(batch[0].shape[0], self.device)
+                    t_clean = torch.zeros(cls_clean.shape[0], dtype=torch.long, device=self.device)
 
-            # images_all = torch.cat([noised_images, clean_images])
-            # timesteps_all = torch.cat([t_noised, t_clean])
-            # labels_all = torch.cat([cls_labels, cls_labels]).argmax(dim=1)
-            images_all = noised_images
-            timesteps_all = t_noised
-            labels_all = cls_labels.argmax(dim=1)
-            sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps_all].float()
+                    cls_images = torch.cat([batch[0], cls_clean])
+                    timesteps = torch.cat([t_noised, t_clean])
+                    cls_labels = torch.cat([batch[1], batch[1]]).argmax(dim=1)
 
-            with self.accelerator.no_sync(self.net):
-                logits = self.net(images_all, timesteps_all, cls_mode=True)
+                    timesteps = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
+                    sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
 
-                ce_loss = self.criterion(logits, labels_all)
-                cls_loss = (ce_loss * sqrt_alphas_cumprod).mean()
-                cls_acc = (logits.argmax(dim=1) == labels_all).float().mean()
-                cls_ece = self.ece_criterion(logits, labels_all)
+                    with self.accelerator.no_sync(self.net):
+                        logits = self.net(cls_images, timesteps, cls_mode=True)
 
-                metrics["cls_loss"] = cls_loss
-                metrics["cls_acc"] = cls_acc
-                metrics["cls_ece"] = cls_ece
+                        # cls_labels = cls_labels.argmax(dim=1)
+                        ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
+                        acc = (logits.argmax(dim=1) == cls_labels).float().mean()
+                        ece = self.ece_criterion(logits, cls_labels)
 
-                # loss += self.ce_weight * cls_loss
+                        metrics["cls_loss"] = ce_loss
+                        metrics["cls_acc"] = acc
+                        metrics["cls_ece"] = ece
 
-                self.accelerator.backward((self.ce_weight * cls_loss) / self.grad_accum_steps)
+                        self.accelerator.backward(self.ce_weight * ce_loss)
 
-        # ---------------------------------------------------------------------
-        """ Diffusion Component """
+                timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
 
-        images, labels = next(self.train_dataloader)
-        timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
+                mask = torch.rand(labels.shape[0], device=self.device) < 0.1
+                labels[mask] = self.label_dim
 
-        mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-        labels[mask] = self.label_dim
+                mse_loss = self.diffusion.training_losses(
+                    net=self.net,
+                    x_start=images,
+                    t=timesteps,
+                    model_kwargs={"class_labels": labels.argmax(dim=1)},
+                )
 
-        mse_loss = self.diffusion.training_losses(
-            net=self.net,
-            x_start=images,
-            t=timesteps,
-            model_kwargs={"class_labels": labels.argmax(dim=1)},
-        )
+                mse_loss = (mse_loss * weights).mean()
+                metrics["mse_loss"] = mse_loss
 
-        mse_loss = (mse_loss * weights).mean()
-        metrics["mse_loss"] = mse_loss
+                self.accelerator.backward(mse_loss)
 
-        # loss += mse_loss
+                if self.accelerator.sync_gradients:
+                    self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
-        # ---------------------------------------------------------------------
-        """ Backward pass and optimizer step """
+                self.accelerator.wait_for_everyone()
+                self.optimizer.step()
+                self.scheduler.step()
+                self.accelerator.wait_for_everyone()
 
-        # self.accelerator.backward(loss / self.grad_accum_steps)
-        self.accelerator.backward(mse_loss / self.grad_accum_steps)
+                grad_norm = 0.0
+                for p in self.net.parameters():
+                    if p.grad is not None:
+                        grad_norm += p.grad.norm(2) ** 2
+                grad_norm = grad_norm**0.5
 
-        if (self.cur_step + 1) % self.grad_accum_steps == 0:
-            self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
-            self.optimizer.step()
-            self.scheduler.step()
-            self.accelerator.wait_for_everyone()
+                param_norm = 0.0
+                for p in self.net.parameters():
+                    param_norm += p.norm(2) ** 2
+                param_norm = param_norm**0.5
 
-        # ---------------------------------------------------------------------
-        """ Compute gradients and other monioring metrics """
+                metrics["grad_norm"] = grad_norm
+                metrics["param_norm"] = param_norm
 
-        grad_norm = 0.0
-        for p in self.net.parameters():
-            if p.grad is not None:
-                grad_norm += p.grad.norm(2) ** 2
-        grad_norm = grad_norm**0.5
+                metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
 
-        param_norm = 0.0
-        for p in self.net.parameters():
-            param_norm += p.norm(2) ** 2
-        param_norm = param_norm**0.5
+                for key, value in metrics.items():
+                    if key not in metric_sums:
+                        metric_sums[key] = 0.0
+                    metric_sums[key] += value.item() if torch.is_tensor(value) else value
 
-        metrics["grad_norm"] = grad_norm
-        metrics["param_norm"] = param_norm
+                if self.accelerator.is_main_process:
+                    pbar.set_postfix({k: f"{float(v.item() if torch.is_tensor(v) else v):.4f}" for k, v in metrics.items()})
 
-        metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
+            self._update_ema()
 
-        return metrics
+        epoch_metrics = {k: torch.tensor(v / len(self.train_dataloader), device=self.device) for k, v in metric_sums.items()}
+
+        return epoch_metrics
 
     def _evaluate(self):
         self.net.eval()
@@ -445,21 +424,21 @@ class Trainer:
                 global_metrics[name] = global_avg
                 self.print_fn(f"{name} = {global_avg:.6f}")
 
-        self.accelerator.log(global_metrics, step=self.cur_step)
+        self.accelerator.log(global_metrics, step=self.cur_epoch)
 
     def _save(self):
         if not self.accelerator.is_main_process:
             return
 
         data = {
-            "step": self.cur_step,
+            "epoch": self.cur_epoch,
             "net": self.accelerator.unwrap_model(self.net).state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "ema": self.ema.state_dict(),
         }
 
-        torch.save(data, os.path.join(self.run_dir, f"model-{self.cur_step:06d}.pt"))
+        torch.save(data, os.path.join(self.run_dir, f"model-{self.cur_epoch:06d}.pt"))
 
     def _load(self):
         """Either load the latest checkpoint from the directory or load the checkpoint from the file
@@ -477,7 +456,7 @@ class Trainer:
 
         data = torch.load(ckpt, map_location=self.device, weights_only=True)
 
-        self.cur_step = data["step"]
+        self.cur_epoch = data["epoch"]
         self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
         self.optimizer.load_state_dict(data["optimizer"])
         self.scheduler.load_state_dict(data["scheduler"])

@@ -44,7 +44,7 @@ def parse_int_list(s):
 @click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
 @click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=128, show_default=True)
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
-@click.option("--num_steps", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=100000, show_default=True)
+@click.option("--num_epochs", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=100, show_default=True)
 @click.option("--resume_from", help="Resume from a previous checkpoint", metavar="DIR", type=str, default=None)
 
 # Hyperparameters.
@@ -67,7 +67,6 @@ def parse_int_list(s):
 
 # I/O-related.
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
-@click.option("--log_interval", help="How often to log the training statistics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
 @click.option("--save_interval", help="How often to save the model", metavar="TICKS", type=click.IntRange(min=1), default=5000, show_default=True)
 def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
@@ -114,7 +113,7 @@ def main(**kwargs):
     )
     trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.Adam", lr=opts.lr)
     trainer_kwargs.scheduler_kwargs = dnnlib.EasyDict(class_name="torch.optim.lr_scheduler.LambdaLR")
-    trainer_kwargs.num_steps = opts.num_steps
+    trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.lr_warmup = opts.lr_warmup
     trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.ce_weight = opts.ce_weight
@@ -163,7 +162,6 @@ def main(**kwargs):
 
     trainer = training_loop.Trainer(**trainer_kwargs)
     trainer.train(
-        log_interval=opts.log_interval,
         save_interval=opts.save_interval,
         eval_interval=opts.eval_interval,
     )
