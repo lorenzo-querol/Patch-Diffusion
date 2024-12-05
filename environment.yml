@@ -21,6 +21,7 @@ dependencies:
   - diffusers # added this line
   - einops # added this line
   - accelerate # added this line
+  - wandb # added this line
   - pip
   - pip:
     - imageio-ffmpeg

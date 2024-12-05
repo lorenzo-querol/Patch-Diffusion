@@ -7,12 +7,12 @@ accelerate launch train.py \
     --batch_size=128 \
     --cond=1 \
     --num_epochs=500 \
-    --model_channels=192 \
-    --channel_mult=1,2,2 \
-    --num_res_blocks=3 \
+    --model_channels=128 \
+    --channel_mult=1,2,2,2 \
+    --num_res_blocks=2 \
     --attn_resolutions=16,8 \
-    --dropout_rate=0.0 \
-    --lr=1e-4 \
+    --dropout_rate=0.1 \
+    --lr=2e-4 \
     --lr_warmup=0 \
     --schedule_name=cosine \
     --timesteps=1000 \
@@ -20,5 +20,4 @@ accelerate launch train.py \
     --label_smooth=0.2 \
     --eval_interval=5 \
     --seed=1 \
-    --save_interval=10 \
-    --resume_from=training-runs/00002-run
+    --save_interval=10
