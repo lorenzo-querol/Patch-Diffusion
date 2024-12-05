@@ -21,3 +21,4 @@ accelerate launch train.py \
     --eval_interval=5 \
     --seed=1 \
     --save_interval=10 \
+    --resume_from=training-runs/00002-run

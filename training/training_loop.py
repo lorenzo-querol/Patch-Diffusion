@@ -21,33 +21,6 @@ from .patch import get_patches
 from .utils import cycle
 
 
-def get_patch_size_list(img_resolution, real_p, train_on_latents):
-    is_smaller_than_64 = img_resolution == 32
-
-    if is_smaller_than_64:
-        batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
-        if real_p < 1.0:
-            p_list = np.array([(1 - real_p), real_p])
-            patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
-            batch_mul_avg = np.sum(p_list * np.array([4, 1]))
-        else:
-            p_list = np.array([0, 1.0])
-            patch_list = np.array([16, 32])
-            batch_mul_avg = 1
-    else:
-        batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
-        if train_on_latents:
-            p_list = np.array([(1 - real_p), real_p])
-            patch_list = np.array([img_resolution // 2, img_resolution])
-            batch_mul_avg = np.sum(p_list * np.array([2, 1]))
-        else:
-            p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
-            patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
-            batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
-
-    return p_list, patch_list, batch_mul_dict, batch_mul_avg
-
-
 def encode_images_to_latents(img_vae, images, latent_scale_factor: float, train_on_latents: bool):
     """Encode images to latents using the given VAE. Return latents if train_on_latents is True, otherwise the input images.
     Args:
@@ -134,6 +107,7 @@ class Trainer:
         """Initialize the Trainer: seeds, datasets, and network."""
         self._init_env()
         self._prepare_dataloaders()
+        self._prepare_patch_info()
         self._build_network_and_diffusion()
 
         if self.resume_from is not None:
@@ -197,6 +171,39 @@ class Trainer:
         """Set requires_grad for all parameters in the model"""
         for param in model.parameters():
             param.requires_grad = requires_grad
+
+    def _prepare_patch_info(self):
+        real_p = self.real_p
+        img_resolution = self.img_resolution
+        is_smaller_than_64 = self.img_resolution == 32
+
+        if is_smaller_than_64:
+            batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
+            if self.real_p < 1.0:
+                p_list = np.array([(1 - real_p), real_p])
+                patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
+                batch_mul_avg = np.sum(p_list * np.array([4, 1]))
+            else:
+                p_list = np.array([0, 1.0])
+                patch_list = np.array([16, 32])
+                batch_mul_avg = 1
+        else:
+            batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
+            if self.train_on_latents:
+                p_list = np.array([(1 - real_p), real_p])
+                patch_list = np.array([img_resolution // 2, img_resolution])
+                batch_mul_avg = np.sum(p_list * np.array([2, 1]))
+            else:
+                p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
+                patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
+                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
+
+        self.p_list = p_list
+        self.patch_list = patch_list
+        self.batch_mul_dict = batch_mul_dict
+        self.batch_mul_avg = batch_mul_avg
+
+        # return p_list, patch_list, batch_mul_dict, batch_mul_avg
 
     def _build_network_and_diffusion(self):
         """Setup network and diffusion"""
@@ -303,6 +310,7 @@ class Trainer:
 
         for images, labels in pbar:
             with self.accelerator.accumulate(self.net):
+
                 self.optimizer.zero_grad(set_to_none=True)
 
                 if self.ce_weight > 0:
