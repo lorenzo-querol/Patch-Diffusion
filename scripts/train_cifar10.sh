@@ -1,5 +1,13 @@
 #!/bin/bash
 
+#PJM -L rscgrp=b-batch
+#PJM -L gpu=2
+#PJM -L elapse=6:00:00
+#PJM -j
+
+source ~/.bashrc
+conda activate edm
+
 accelerate launch train.py \
     --outdir=training-runs \
     --train_dir=./data/cifar10/train \
@@ -20,4 +28,4 @@ accelerate launch train.py \
     --label_smooth=0.2 \
     --eval_interval=5 \
     --seed=1 \
-    --save_interval=10
+    --save_interval=10 

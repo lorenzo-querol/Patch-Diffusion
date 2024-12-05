@@ -314,15 +314,7 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 if self.ce_weight > 0:
-                    batch = next(self.cls_dataloader)
-                    cls_clean = batch[0]
-
-                    t_noised, _ = self.schedule_sampler.sample(batch[0].shape[0], self.device)
-                    t_clean = torch.zeros(cls_clean.shape[0], dtype=torch.long, device=self.device)
-
-                    cls_images = torch.cat([batch[0], cls_clean])
-                    timesteps = torch.cat([t_noised, t_clean])
-                    cls_labels = torch.cat([batch[1], batch[1]]).argmax(dim=1)
+                    cls_images, cls_labels = next(self.cls_dataloader)
 
                     timesteps = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
                     sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
@@ -330,7 +322,7 @@ class Trainer:
                     with self.accelerator.no_sync(self.net):
                         logits = self.net(cls_images, timesteps, cls_mode=True)
 
-                        # cls_labels = cls_labels.argmax(dim=1)
+                        cls_labels = cls_labels.argmax(dim=1)
                         ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
                         acc = (logits.argmax(dim=1) == cls_labels).float().mean()
                         ece = self.ece_criterion(logits, cls_labels)
@@ -364,7 +356,6 @@ class Trainer:
                 self.accelerator.wait_for_everyone()
                 self.optimizer.step()
                 self.scheduler.step()
-                self.accelerator.wait_for_everyone()
 
                 grad_norm = 0.0
                 for p in self.net.parameters():
