@@ -107,7 +107,12 @@ class Dataset(torch.utils.data.Dataset):
             image = image[:, :, ::-1]
 
         if self._transform:
-            image = PIL.Image.fromarray(image.transpose(1, 2, 0))
+            # Ensure the image array has the correct shape and data type
+            if image.ndim == 3 and image.shape[0] == 1:
+                image = image.squeeze(axis=0)
+            elif image.ndim == 3 and image.shape[0] == 3:
+                image = image.transpose(1, 2, 0)
+            image = PIL.Image.fromarray(image)
             image = self._transform(image)
 
         return image, self.get_label(idx)
@@ -231,14 +236,23 @@ class ImageFolderDataset(Dataset):
 
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
-        with self._open_file(fname) as f:
-            if self._use_pyspng and pyspng is not None and self._file_ext(fname) == ".png":
-                image = pyspng.load(f.read())
-            else:
+        if self._type == "dir":
+            with open(os.path.join(self._path, fname), "rb") as f:
                 image = np.array(PIL.Image.open(f))
-        if image.ndim == 2:
-            image = image[:, :, np.newaxis]  # HW => HWC
-        image = image.transpose(2, 0, 1)  # HWC => CHW
+        elif self._type == "zip":
+            with self._get_zipfile().open(fname, "r") as f:
+                image = np.array(PIL.Image.open(f))
+        else:
+            raise IOError("Unknown data source type")
+
+        # Ensure the image has 3 dimensions (CHW)
+        if image.ndim == 2:  # Grayscale image
+            image = image[np.newaxis, :, :]
+        elif image.ndim == 3 and image.shape[2] == 3:  # RGB image
+            image = image.transpose(2, 0, 1)
+        else:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+
         return image
 
     def _load_raw_labels(self):

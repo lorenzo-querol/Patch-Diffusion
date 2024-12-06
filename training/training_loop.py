@@ -309,35 +309,34 @@ class Trainer:
         pbar = tqdm(self.train_dataloader, desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_main_process)
 
         for images, labels in pbar:
+
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if self.ce_weight > 0:
+                cls_images, cls_labels = next(self.cls_dataloader)
+
+                timesteps = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
+                sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
+
+                with self.accelerator.no_sync(self.net):
+                    logits = self.net(cls_images, timesteps, cls_mode=True)
+
+                    cls_labels = cls_labels.argmax(dim=1)
+                    ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
+                    acc = (logits.argmax(dim=1) == cls_labels).float().mean()
+                    ece = self.ece_criterion(logits, cls_labels)
+
+                    metrics["cls_loss"] = ce_loss
+                    metrics["cls_acc"] = acc
+                    metrics["cls_ece"] = ece
+
+                    self.accelerator.backward(self.ce_weight * ce_loss)
+
+            timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
+            # mask = torch.rand(labels.shape[0], device=self.device) < 0.1
+            # labels[mask] = self.label_dim
+
             with self.accelerator.accumulate(self.net):
-
-                self.optimizer.zero_grad(set_to_none=True)
-
-                if self.ce_weight > 0:
-                    cls_images, cls_labels = next(self.cls_dataloader)
-
-                    timesteps = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
-                    sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
-
-                    with self.accelerator.no_sync(self.net):
-                        logits = self.net(cls_images, timesteps, cls_mode=True)
-
-                        cls_labels = cls_labels.argmax(dim=1)
-                        ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
-                        acc = (logits.argmax(dim=1) == cls_labels).float().mean()
-                        ece = self.ece_criterion(logits, cls_labels)
-
-                        metrics["cls_loss"] = ce_loss
-                        metrics["cls_acc"] = acc
-                        metrics["cls_ece"] = ece
-
-                        self.accelerator.backward(self.ce_weight * ce_loss)
-
-                timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
-
-                mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-                labels[mask] = self.label_dim
-
                 mse_loss = self.diffusion.training_losses(
                     net=self.net,
                     x_start=images,
@@ -353,33 +352,32 @@ class Trainer:
                 if self.accelerator.sync_gradients:
                     self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
-                self.accelerator.wait_for_everyone()
                 self.optimizer.step()
                 self.scheduler.step()
 
-                grad_norm = 0.0
-                for p in self.net.parameters():
-                    if p.grad is not None:
-                        grad_norm += p.grad.norm(2) ** 2
-                grad_norm = grad_norm**0.5
+            grad_norm = 0.0
+            for p in self.net.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.norm(2) ** 2
+            grad_norm = grad_norm**0.5
 
-                param_norm = 0.0
-                for p in self.net.parameters():
-                    param_norm += p.norm(2) ** 2
-                param_norm = param_norm**0.5
+            param_norm = 0.0
+            for p in self.net.parameters():
+                param_norm += p.norm(2) ** 2
+            param_norm = param_norm**0.5
 
-                metrics["grad_norm"] = grad_norm
-                metrics["param_norm"] = param_norm
+            metrics["grad_norm"] = grad_norm
+            metrics["param_norm"] = param_norm
 
-                metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
+            metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
 
-                for key, value in metrics.items():
-                    if key not in metric_sums:
-                        metric_sums[key] = 0.0
-                    metric_sums[key] += value.item() if torch.is_tensor(value) else value
+            for key, value in metrics.items():
+                if key not in metric_sums:
+                    metric_sums[key] = 0.0
+                metric_sums[key] += value.item() if torch.is_tensor(value) else value
 
-                if self.accelerator.is_main_process:
-                    pbar.set_postfix({k: f"{float(v.item() if torch.is_tensor(v) else v):.4f}" for k, v in metrics.items()})
+            if self.accelerator.is_main_process:
+                pbar.set_postfix({k: f"{float(v.item() if torch.is_tensor(v) else v):.4f}" for k, v in metrics.items()})
 
             self._update_ema()
 

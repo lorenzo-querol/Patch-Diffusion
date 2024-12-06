@@ -71,14 +71,14 @@ def save_dataset(images, labels, dest):
 
         # Handle both Tensor and NumPy array cases
         if isinstance(img, torch.Tensor):
-            img_np = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            img_np = (img.squeeze().numpy() * 255).astype(np.uint8)
         elif isinstance(img, np.ndarray):
-            img_np = (img.transpose(1, 2, 0) * 255).astype(np.uint8)
+            img_np = (img.squeeze() * 255).astype(np.uint8)
         else:
             raise TypeError(f"Unsupported image type: {type(img)}")
 
         # Determine if the image is grayscale or RGB
-        channels = img_np.shape[2] if len(img_np.shape) == 3 else 1
+        channels = 1 if len(img_np.shape) == 2 else img_np.shape[2]
         img_pil = PIL.Image.fromarray(img_np, {1: "L", 3: "RGB"}[channels])
         img_pil.save(file_path, format="png")
 

@@ -6,7 +6,7 @@ For CIFAR10/100 dataset, you can use the following commands.
 
 ```bash
 # Example: 20% of the training data will be used as validation set if val_ratio is set to 0.2
-python dataset_tool.py --dataset cifar10 \
+python dataset_tool.py --dataset mnist \
                        --dest ./data \
                        --val_ratio 0.0
 ```

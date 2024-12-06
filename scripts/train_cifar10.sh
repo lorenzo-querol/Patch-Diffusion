@@ -5,8 +5,8 @@
 #PJM -L elapse=6:00:00
 #PJM -j
 
-source ~/.bashrc
-conda activate edm
+# source ~/.bashrc
+# conda activate edm
 
 accelerate launch train.py \
     --outdir=training-runs \
@@ -25,7 +25,7 @@ accelerate launch train.py \
     --schedule_name=cosine \
     --timesteps=1000 \
     --ce_weight=0.001 \
-    --label_smooth=0.2 \
+    --label_smooth=0.0 \
     --eval_interval=5 \
     --seed=1 \
-    --save_interval=10 
+    --save_interval=10
