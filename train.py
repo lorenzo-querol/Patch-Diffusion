@@ -111,7 +111,7 @@ def main(**kwargs):
         schedule_name=opts.schedule_name,
         timesteps=opts.timesteps,
     )
-    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.Adam", lr=opts.lr)
+    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr)
     trainer_kwargs.scheduler_kwargs = dnnlib.EasyDict(class_name="torch.optim.lr_scheduler.LambdaLR")
     trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.lr_warmup = opts.lr_warmup

@@ -98,7 +98,7 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=4)
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=1)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self._init_trainer()
@@ -310,7 +310,7 @@ class Trainer:
 
         for images, labels in pbar:
 
-            self.optimizer.zero_grad(set_to_none=True)
+            self.optimizer.zero_grad()
 
             if self.ce_weight > 0:
                 cls_images, cls_labels = next(self.cls_dataloader)
@@ -349,23 +349,13 @@ class Trainer:
 
                 self.accelerator.backward(mse_loss)
 
-                # if self.accelerator.sync_gradients:
-                #     self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+                if self.accelerator.sync_gradients:
+                    self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
                 self.optimizer.step()
                 self.scheduler.step()
 
-            grad_norm = 0.0
-            for p in self.net.parameters():
-                if p.grad is not None:
-                    grad_norm += p.grad.norm(2) ** 2
-            grad_norm = grad_norm**0.5
-
-            param_norm = 0.0
-            for p in self.net.parameters():
-                param_norm += p.norm(2) ** 2
-            param_norm = param_norm**0.5
-
+            grad_norm, param_norm = self._compute_norms()
             metrics["grad_norm"] = grad_norm
             metrics["param_norm"] = param_norm
 
@@ -402,6 +392,21 @@ class Trainer:
 
         self.net.train()
         return {k: torch.stack(v).mean() for k, v in metrics.items()}
+
+    def _compute_norms(self):
+        """Compute the gradient and parameter norms."""
+        grad_norm = 0.0
+        for p in self.net.parameters():
+            if p.grad is not None:
+                grad_norm += p.grad.norm(2) ** 2
+        grad_norm = grad_norm**0.5
+
+        param_norm = 0.0
+        for p in self.net.parameters():
+            param_norm += p.norm(2) ** 2
+        param_norm = param_norm**0.5
+
+        return grad_norm, param_norm
 
     def _report_metrics(self, metrics: dict):
         """
