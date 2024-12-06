@@ -1,15 +1,16 @@
-import os
-import json
 import io
+import json
+import os
 import zipfile
+from typing import Callable, Optional, Tuple, Union
+
+import click
 import numpy as np
 import PIL.Image
-from typing import Callable, Optional, Tuple, Union
-from tqdm import tqdm
-import click
 import torch
 import torchvision
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
 # import medmnist
 # from medmnist import INFO, Evaluator
@@ -69,20 +70,32 @@ def save_dataset(images, labels, dest):
         archive_fname = f"img{idx_str}.png"
         file_path = os.path.join(dest, archive_fname)
 
-        # Handle both Tensor and NumPy array cases
-        if isinstance(img, torch.Tensor):
-            img_np = (img.squeeze().numpy() * 255).astype(np.uint8)
-        elif isinstance(img, np.ndarray):
-            img_np = (img.squeeze() * 255).astype(np.uint8)
-        else:
-            raise TypeError(f"Unsupported image type: {type(img)}")
-
-        # Determine if the image is grayscale or RGB
-        channels = 1 if len(img_np.shape) == 2 else img_np.shape[2]
-        img_pil = PIL.Image.fromarray(img_np, {1: "L", 3: "RGB"}[channels])
+        # Convert from CHW to HWC format and scale to 0-255 range
+        img_np = (np.transpose(img, (1, 2, 0)) * 255).astype(np.uint8)
+        
+        # Save as RGB image
+        img_pil = PIL.Image.fromarray(img_np, 'RGB')
         img_pil.save(file_path, format="png")
 
         label_dict[archive_fname] = int(label)
+        # idx_str = f"{idx:08d}"
+        # archive_fname = f"img{idx_str}.png"
+        # file_path = os.path.join(dest, archive_fname)
+
+        # # Handle both Tensor and NumPy array cases
+        # if isinstance(img, torch.Tensor):
+        #     img_np = (img.squeeze().numpy() * 255).astype(np.uint8)
+        # elif isinstance(img, np.ndarray):
+        #     img_np = (img.squeeze() * 255).astype(np.uint8)
+        # else:
+        #     raise TypeError(f"Unsupported image type: {type(img)}")
+
+        # # Determine if the image is grayscale or RGB
+        # channels = 1 if len(img_np.shape) == 2 else img_np.shape[2]
+        # img_pil = PIL.Image.fromarray(img_np, {1: "L", 3: "RGB"}[channels])
+        # img_pil.save(file_path, format="png")
+
+        # label_dict[archive_fname] = int(label)
 
     # Save metadata
     metadata = {"labels": label_dict}

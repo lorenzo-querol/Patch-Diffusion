@@ -349,8 +349,8 @@ class Trainer:
 
                 self.accelerator.backward(mse_loss)
 
-                if self.accelerator.sync_gradients:
-                    self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+                # if self.accelerator.sync_gradients:
+                #     self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
                 self.optimizer.step()
                 self.scheduler.step()
