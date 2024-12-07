@@ -98,7 +98,7 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=8)
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=2)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self._init_trainer()
@@ -211,7 +211,7 @@ class Trainer:
         for res in self.network_kwargs["attn_resolutions"]:
             attention_ds.append(self.img_resolution // int(res))
 
-        self.network_kwargs.update("attn_resolutions", tuple(attention_ds))
+        self.network_kwargs.update({"attn_resolutions": attention_ds})
 
         self.net = dnnlib.util.construct_class_by_name(
             **self.network_kwargs,
@@ -337,28 +337,28 @@ class Trainer:
 
                     self.accelerator.backward(self.ce_weight * ce_loss)
 
-            # timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
-            # mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-            # labels[mask] = self.label_dim
+            timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
+            mask = torch.rand(labels.shape[0], device=self.device) < 0.1
+            labels[mask] = self.label_dim
 
-            # with self.accelerator.accumulate(self.net):
-            # mse_loss = self.diffusion.training_losses(
-            #     net=self.net,
-            #     x_start=images,
-            #     t=timesteps,
-            #     model_kwargs={"class_labels": labels.argmax(dim=1)},
-            # )
+            with self.accelerator.accumulate(self.net):
+                mse_loss = self.diffusion.training_losses(
+                    net=self.net,
+                    x_start=images,
+                    t=timesteps,
+                    model_kwargs={"class_labels": labels.argmax(dim=1)},
+                )
 
-            # mse_loss = (mse_loss * weights).mean()
-            # metrics["mse_loss"] = mse_loss
+                mse_loss = (mse_loss * weights).mean()
+                metrics["mse_loss"] = mse_loss
 
-            # self.accelerator.backward(mse_loss)
+                self.accelerator.backward(mse_loss)
 
-            # if self.accelerator.sync_gradients:
-            #     self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+                if self.accelerator.sync_gradients:
+                    self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
-            self.optimizer.step()
-            self.scheduler.step()
+                self.optimizer.step()
+                self.scheduler.step()
 
             grad_norm, param_norm = self._compute_norms()
             metrics["grad_norm"] = grad_norm

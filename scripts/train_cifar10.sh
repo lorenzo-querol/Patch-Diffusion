@@ -19,13 +19,13 @@ accelerate launch train.py \
     --channel_mult=1,2,2 \
     --num_res_blocks=3 \
     --attn_resolutions=16,8 \
-    --dropout_rate=0.1 \
+    --dropout_rate=0.0 \
     --lr=1e-4 \
     --lr_warmup=0 \
     --schedule_name=cosine \
     --timesteps=1000 \
-    --ce_weight=1.0 \
-    --label_smooth=0.0 \
+    --ce_weight=0.001 \
+    --label_smooth=0.2 \
     --eval_interval=5 \
     --seed=1 \
     --save_interval=10
