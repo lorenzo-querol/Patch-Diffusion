@@ -24,7 +24,7 @@ accelerate launch train.py \
     --lr_warmup=0 \
     --schedule_name=cosine \
     --timesteps=1000 \
-    --ce_weight=0.001 \
+    --ce_weight=1.0 \
     --label_smooth=0.0 \
     --eval_interval=5 \
     --seed=1 \

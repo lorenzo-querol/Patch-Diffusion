@@ -98,7 +98,7 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=1)
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=8)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self._init_trainer()
@@ -203,11 +203,16 @@ class Trainer:
         self.batch_mul_dict = batch_mul_dict
         self.batch_mul_avg = batch_mul_avg
 
-        # return p_list, patch_list, batch_mul_dict, batch_mul_avg
-
     def _build_network_and_diffusion(self):
         """Setup network and diffusion"""
         self.print_fn("Constructing network and diffusion...")
+
+        attention_ds = []
+        for res in self.network_kwargs["attn_resolutions"]:
+            attention_ds.append(self.img_resolution // int(res))
+
+        self.network_kwargs.update("attn_resolutions", tuple(attention_ds))
+
         self.net = dnnlib.util.construct_class_by_name(
             **self.network_kwargs,
             img_resolution=self.img_resolution,
@@ -332,42 +337,38 @@ class Trainer:
 
                     self.accelerator.backward(self.ce_weight * ce_loss)
 
-            timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
+            # timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
             # mask = torch.rand(labels.shape[0], device=self.device) < 0.1
             # labels[mask] = self.label_dim
 
-            with self.accelerator.accumulate(self.net):
-                mse_loss = self.diffusion.training_losses(
-                    net=self.net,
-                    x_start=images,
-                    t=timesteps,
-                    model_kwargs={"class_labels": labels.argmax(dim=1)},
-                )
+            # with self.accelerator.accumulate(self.net):
+            # mse_loss = self.diffusion.training_losses(
+            #     net=self.net,
+            #     x_start=images,
+            #     t=timesteps,
+            #     model_kwargs={"class_labels": labels.argmax(dim=1)},
+            # )
 
-                mse_loss = (mse_loss * weights).mean()
-                metrics["mse_loss"] = mse_loss
+            # mse_loss = (mse_loss * weights).mean()
+            # metrics["mse_loss"] = mse_loss
 
-                self.accelerator.backward(mse_loss)
+            # self.accelerator.backward(mse_loss)
 
-                if self.accelerator.sync_gradients:
-                    self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+            # if self.accelerator.sync_gradients:
+            #     self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
-                self.optimizer.step()
-                self.scheduler.step()
+            self.optimizer.step()
+            self.scheduler.step()
 
             grad_norm, param_norm = self._compute_norms()
             metrics["grad_norm"] = grad_norm
             metrics["param_norm"] = param_norm
-
             metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
 
             for key, value in metrics.items():
                 if key not in metric_sums:
                     metric_sums[key] = 0.0
                 metric_sums[key] += value.item() if torch.is_tensor(value) else value
-
-            if self.accelerator.is_main_process:
-                pbar.set_postfix({k: f"{float(v.item() if torch.is_tensor(v) else v):.4f}" for k, v in metrics.items()})
 
             self._update_ema()
 
