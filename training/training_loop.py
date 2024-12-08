@@ -98,10 +98,15 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=2)
+        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=4)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
+        self.per_device_batch_size = self._calculate_per_device_batch_size()
         self._init_trainer()
+
+    def _calculate_per_device_batch_size(self):
+        """Calculate the batch size per device."""
+        return self.batch_size // self.accelerator.num_processes // self.accelerator.gradient_accumulation_steps
 
     def _init_trainer(self):
         """Initialize the Trainer: seeds, datasets, and network."""
@@ -148,7 +153,7 @@ class Trainer:
         self.cls_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=augment_transform)
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         dataloader_kwargs = dict(
-            batch_size=self.batch_size,
+            batch_size=self.per_device_batch_size,
             drop_last=True,
             pin_memory=True,
             num_workers=4,
@@ -338,15 +343,19 @@ class Trainer:
                     self.accelerator.backward(self.ce_weight * ce_loss)
 
             timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
+            # mask = torch.rand(labels.shape[0], device=self.device) < 0.1
+            # labels[mask] = self.label_dim
+
+            labels = labels.argmax(dim=1)
             mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-            labels[mask] = self.label_dim
+            labels[mask] = torch.randint(0, self.label_dim, (mask.sum(),), device=self.device)
 
             with self.accelerator.accumulate(self.net):
                 mse_loss = self.diffusion.training_losses(
                     net=self.net,
                     x_start=images,
                     t=timesteps,
-                    model_kwargs={"class_labels": labels.argmax(dim=1)},
+                    model_kwargs={"class_labels": labels},
                 )
 
                 mse_loss = (mse_loss * weights).mean()
