@@ -98,7 +98,7 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(split_batches=True, log_with="wandb", gradient_accumulation_steps=4)
+        self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=1)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self.per_device_batch_size = self._calculate_per_device_batch_size()
@@ -106,7 +106,10 @@ class Trainer:
 
     def _calculate_per_device_batch_size(self):
         """Calculate the batch size per device."""
-        return self.batch_size // self.accelerator.num_processes // self.accelerator.gradient_accumulation_steps
+        world_size = self.accelerator.num_processes
+        per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
+        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        return per_device_batch_size
 
     def _init_trainer(self):
         """Initialize the Trainer: seeds, datasets, and network."""
@@ -216,7 +219,7 @@ class Trainer:
         for res in self.network_kwargs["attn_resolutions"]:
             attention_ds.append(self.img_resolution // int(res))
 
-        self.network_kwargs.update({"attn_resolutions": attention_ds})
+        self.network_kwargs.update({"attn_resolutions": tuple(attention_ds)})
 
         self.net = dnnlib.util.construct_class_by_name(
             **self.network_kwargs,
@@ -232,7 +235,7 @@ class Trainer:
         """ Setup EMA """
         self.print_fn("Setting up EMA...")
         if self.accelerator.is_main_process:
-            self.ema = EMA(self.net)
+            self.ema = EMA(self.net, beta=0.999)
 
         # ---------------------------------------------------------------------
         """ Setup the optimizer """
@@ -271,13 +274,14 @@ class Trainer:
 
         img_size, img_channels = self.img_resolution, self.img_channels
         samples = torch.randn((num_images, img_channels, img_size, img_size), device=self.device)
+        random_labels = torch.randint(0, self.label_dim, (num_images,), device=self.device)
 
         self.ema.eval()
         for t in reversed(range(0, self.diffusion.num_timesteps)):
             timesteps = torch.full((num_images,), t, device=self.device, dtype=torch.long)
 
             with torch.no_grad():
-                pred_noise = self.ema(samples, timesteps)
+                pred_noise = self.ema(samples, timesteps, class_labels=random_labels)
                 samples = self.diffusion.p_sample(pred_noise, samples, timesteps)
 
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
@@ -343,12 +347,11 @@ class Trainer:
                     self.accelerator.backward(self.ce_weight * ce_loss)
 
             timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
-            # mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-            # labels[mask] = self.label_dim
-
             labels = labels.argmax(dim=1)
-            mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-            labels[mask] = torch.randint(0, self.label_dim, (mask.sum(),), device=self.device)
+
+            if self.net.training:
+                mask = torch.rand(labels.shape[0], device=self.device) < 0.1
+                labels[mask] = self.label_dim
 
             with self.accelerator.accumulate(self.net):
                 mse_loss = self.diffusion.training_losses(
@@ -386,9 +389,9 @@ class Trainer:
         return epoch_metrics
 
     def _evaluate(self):
-        self.net.eval()
         metrics = {"val_cls_loss": [], "val_cls_acc": [], "val_cls_ece": []}
 
+        self.net.eval()
         with torch.no_grad():
             for images, labels in self.val_dataloader:
                 images, labels = images.to(self.device), labels.to(self.device).argmax(dim=1)
@@ -399,8 +402,8 @@ class Trainer:
                 metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
                 metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
                 metrics["val_cls_ece"].append(self.ece_criterion(logits, labels))
-
         self.net.train()
+
         return {k: torch.stack(v).mean() for k, v in metrics.items()}
 
     def _compute_norms(self):

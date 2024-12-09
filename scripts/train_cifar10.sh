@@ -15,11 +15,11 @@ accelerate launch train.py \
     --batch_size=128 \
     --cond=1 \
     --num_epochs=500 \
-    --model_channels=192 \
+    --model_channels=64 \
     --channel_mult=1,2,2 \
     --num_res_blocks=3 \
     --attn_resolutions=16,8 \
-    --dropout_rate=0.0 \
+    --dropout_rate=0 \
     --lr=1e-4 \
     --lr_warmup=0 \
     --schedule_name=cosine \

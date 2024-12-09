@@ -7,7 +7,6 @@ import click
 from accelerate import Accelerator
 
 import dnnlib
-import torch_utils.distributed as dist
 from training import training_loop
 
 warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.

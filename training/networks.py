@@ -708,8 +708,8 @@ class EBMUNet(nn.Module):
                 hs = []
                 emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
                 if self.label_dim is not None:
-                    if class_labels is None:
-                        class_labels = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
+                    # if class_labels is None:
+                    #     class_labels = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
                     context = self.label_emb(class_labels)
                     context = context[:, None, ...]
                 else:
