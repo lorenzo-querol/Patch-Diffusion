@@ -238,3 +238,42 @@ class GaussianDiffusion:
                 x = alpha_next * pred_x_start + torch.sqrt(1 - alpha_next**2 - sigma_t_next**2) * pred_noise + sigma_t_next * noise
 
         return x
+
+    def sample_images_ddim_v(self, net, shape, pos, labels, device, eta=0.0, timesteps=50):
+        # Start from pure noise
+        x = torch.randn(shape).to(device)
+
+        # Select timesteps for DDIM
+        skip = self.num_timesteps // timesteps
+        seq = list(range(0, self.num_timesteps, skip))
+
+        for i in range(len(seq) - 1):
+            t = seq[len(seq) - 1 - i]
+            t_next = seq[len(seq) - 2 - i] if i < len(seq) - 1 else 0
+
+            t_batch = torch.full((shape[0],), t, device=device)
+            t_next_batch = torch.full((shape[0],), t_next, device=device)
+
+            with torch.no_grad():
+                # Model predicts v
+                pred_v = net(torch.cat((x, pos), dim=1), t_batch, class_labels=labels)
+
+                # Get alphas and sigmas for current and next timestep
+                alpha_t = self._extract(self.sqrt_alphas_cumprod, t_batch, x.shape)
+                alpha_next = self._extract(self.sqrt_alphas_cumprod, t_next_batch, x.shape)
+                sigma_t = self._extract(self.sqrt_one_minus_alphas_cumprod, t_batch, x.shape)
+
+                # Convert v to x_0 and epsilon predictions
+                pred_eps = (x - alpha_t * pred_v) / sigma_t
+                pred_x0 = (pred_v * sigma_t - x) / (-alpha_t)
+
+                # DDIM formula
+                sigma_t_next = eta * torch.sqrt((1 - alpha_next**2) / (1 - alpha_t**2) * (1 - alpha_t**2 / alpha_next**2))
+
+                # No noise when t_next == 0 or eta == 0
+                noise = 0 if t_next == 0 or eta == 0 else torch.randn_like(x)
+
+                # DDIM update step
+                x = alpha_next * pred_x0 + torch.sqrt(1 - alpha_next**2 - sigma_t_next**2) * pred_eps + sigma_t_next * noise
+
+        return x
