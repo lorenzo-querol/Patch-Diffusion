@@ -661,7 +661,7 @@ class EBMUNet(nn.Module):
 
         self.pool = pool
         if pool == "adaptive":
-            self.fc = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
+            self.fc = None
         elif pool == "attn":
             self.fc = nn.Sequential(AttentionPool2d(img_resolution, out_channels, out_channels, label_dim))
         elif pool == "sattn":
@@ -699,24 +699,29 @@ class EBMUNet(nn.Module):
                 h = module(h, emb, context)
 
             h = h.type(x.dtype)
-            logits = self.out(h)
+            out = self.out(h)
 
-            return self.fc(logits)
+            # out = F.avg_pool2d(out, (out.size(2), out.size(3)))
+            # out = out.view(out.size(0), -1)
 
+            return self.fc(out)
         else:
             with torch.enable_grad():
                 hs = []
                 emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
                 if self.label_dim is not None:
-                    # if class_labels is None:
-                    #     class_labels = torch.ones(x.shape[0]).long().to(x.device) * self.label_dim
                     context = self.label_emb(class_labels)
                     context = context[:, None, ...]
                 else:
                     context = None
 
-                input_tensor = torch.autograd.Variable(x, requires_grad=True)
-                h = input_tensor.type(self.dtype)
+                # Only make image require gradients
+                images, coords = x[:, :3], x[:, 3:].detach()
+                input_tensor = torch.autograd.Variable(images, requires_grad=True)
+
+                # Recombine for forward pass
+                x = torch.cat([input_tensor, coords], dim=1)
+                h = x.type(self.dtype)
 
                 for module in self.input_blocks:
                     h = module(h, emb, context)

@@ -5,6 +5,7 @@ import torch
 import math
 
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 def exists(x):
@@ -50,24 +51,6 @@ def get_beta_schedule(schedule_name, timesteps):
         return cosine_beta_schedule(timesteps)
     else:
         raise ValueError(f"Unknown schedule name: {schedule_name}")
-
-
-def extract(arr, timesteps, broadcast_shape):
-    """
-    Extract values from a 1-D numpy array for a batch of indices.
-
-    :param arr: the 1-D numpy array.
-    :param timesteps: a tensor of indices into the array to extract.
-    :param broadcast_shape: a larger shape of K dimensions with the batch
-                            dimension equal to the length of timesteps.
-    :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
-    """
-    timesteps = timesteps.to(torch.long)
-
-    res = torch.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
-    while len(res.shape) < len(broadcast_shape):
-        res = res[..., None]
-    return res.expand(broadcast_shape)
 
 
 class GaussianDiffusion:
@@ -144,24 +127,29 @@ class GaussianDiffusion:
         """
         return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
-    def training_losses(self, net, x_start, t, noise=None, model_kwargs=None):
+    def get_v(self, x, noise, t):
+        return self._extract(self.sqrt_alphas_cumprod, t, x.shape) * noise - self._extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
+
+    def training_losses(self, net, x_start, t, target="eps", model_kwargs={}):
         """Compute the training loss for the diffusion model.
 
         :param net: Diffusion model.
         :param x_start: the [N x C x ...] tensor of inputs.
         :param t: A batch of timesteps.
-        :param noise: If specified, the specific Gaussian noise to try to remove.
+        :param target: the target to predict. One of "eps", "x_start", or "v".
+        :param model_kwargs: additional keyword arguments to pass to the model.
         :return loss: the training loss.
         """
+        assert target in ["eps", "x_start", "v"], f"Unknown target: {target}"
 
-        if noise is None:
-            noise = torch.randn_like(x_start)
-
-        if model_kwargs is None:
-            model_kwargs = {}
-
+        noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise)
-        loss = F.mse_loss(net(x_t, t, **model_kwargs), noise)
+
+        target_map = {"eps": noise, "x_start": x_start, "v": self.get_v(x_start, noise, t)}
+        target = target_map[target]
+
+        output = net(x_t, t, **model_kwargs)
+        loss = F.mse_loss(output, target[:, :3])
 
         return loss
 
@@ -210,3 +198,43 @@ class GaussianDiffusion:
         # No noise when t == 0
         nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * torch.exp(0.5 * model_log_variance) * noise
+
+    def sample_images_ddim(self, net, shape, pos, labels, device, eta=0.0, timesteps=50):
+        # Start from pure noise
+        x = torch.randn(shape).to(device)
+
+        # Select timesteps for DDIM (evenly spaced)
+        skip = self.num_timesteps // timesteps
+        seq = list(range(0, self.num_timesteps, skip))
+
+        for i in tqdm(range(len(seq)), desc="DDIM sampling", leave=False):
+            t = seq[len(seq) - 1 - i]  # Current timestep
+            t_next = seq[len(seq) - 2 - i] if i < len(seq) - 1 else 0  # Next timestep
+
+            t_batch = torch.full((shape[0],), t, device=device)
+            t_next_batch = torch.full((shape[0],), t_next, device=device)
+
+            with torch.no_grad():
+                # Model predicts x_start directly
+                pred_x_start = net(torch.cat((x, pos), dim=1), t_batch, class_labels=labels)
+
+                # Get alpha values for current and next timestep
+                alpha_t = self._extract(self.sqrt_alphas_cumprod, t_batch, x.shape)
+                alpha_next = self._extract(self.sqrt_alphas_cumprod, t_next_batch, x.shape)
+
+                # Get sigma values
+                sigma_t = self._extract(self.sqrt_one_minus_alphas_cumprod, t_batch, x.shape)
+
+                # Calculate predicted noise
+                pred_noise = (x - alpha_t * pred_x_start) / sigma_t
+
+                # DDIM formula
+                sigma_t_next = eta * torch.sqrt((1 - alpha_next**2) / (1 - alpha_t**2) * (1 - alpha_t**2 / alpha_next**2))
+
+                # No noise when t_next == 0 or eta == 0
+                noise = 0 if t_next == 0 or eta == 0 else torch.randn_like(x)
+
+                # DDIM update step
+                x = alpha_next * pred_x_start + torch.sqrt(1 - alpha_next**2 - sigma_t_next**2) * pred_noise + sigma_t_next * noise
+
+        return x
