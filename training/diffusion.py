@@ -67,6 +67,7 @@ class GaussianDiffusion:
         self.clip_max = clip_max
 
         # Define variance schedule
+        assert schedule_name in ["linear", "cosine"], f"Unknown schedule name: {schedule_name}, choose from ['linear', 'cosine']"
         self.betas = betas = get_beta_schedule(schedule_name, timesteps)
         self.num_timesteps = int(timesteps)
 
@@ -85,8 +86,7 @@ class GaussianDiffusion:
         posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.posterior_variance = posterior_variance
 
-        # Log calculation clipped because the posterior variance is 0 at the beginning
-        # of the diffusion chain
+        # Log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.posterior_log_variance_clipped = np.log(np.maximum(posterior_variance, 1e-20))
         self.posterior_mean_coef1 = betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.posterior_mean_coef2 = (1.0 - alphas_cumprod_prev) * np.sqrt(alphas) / (1.0 - alphas_cumprod)
@@ -140,7 +140,7 @@ class GaussianDiffusion:
         :param model_kwargs: additional keyword arguments to pass to the model.
         :return loss: the training loss.
         """
-        assert target in ["eps", "x_start", "v"], f"Unknown target: {target}"
+        assert target in ["eps", "x_start", "v"], f"Unknown target: {target}, choose from ['eps', 'x_start', 'v']"
 
         noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise)
@@ -149,7 +149,7 @@ class GaussianDiffusion:
         target = target_map[target]
 
         output = net(x_t, t, **model_kwargs)
-        loss = F.mse_loss(output, target[:, :3])
+        loss = F.mse_loss(output, target[:, :3], reduction="none")
 
         return loss
 
