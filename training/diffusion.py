@@ -149,7 +149,7 @@ class GaussianDiffusion:
         target = target_map[target]
 
         output = net(x_t, t, **model_kwargs)
-        loss = F.mse_loss(output, target[:, :3], reduction="none")
+        loss = F.mse_loss(output, target[:, :3])
 
         return loss
 

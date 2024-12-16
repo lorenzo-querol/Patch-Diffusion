@@ -296,7 +296,10 @@ class Trainer:
         pos = pos.unsqueeze(0).repeat(num_images, 1, 1, 1)
         class_labels = torch.randint(0, self.label_dim, (num_images,), device=self.device)
 
-        samples = self.diffusion.sample_images_ddim(self.ema, shape, pos, class_labels, self.device, timesteps=20)
+        if self.target == "v":
+            samples = self.diffusion.sample_images_ddim_v(self.ema, shape, pos, class_labels, self.device, timesteps=20)
+        else:
+            samples = self.diffusion.sample_images_ddim(self.ema, shape, pos, class_labels, self.device, timesteps=20)
 
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
         torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
@@ -339,15 +342,22 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.ce_weight > 0:
-            cls_images, cls_labels = next(self.cls_dataloader)
-            timesteps = torch.zeros(cls_images.shape[0], dtype=torch.long, device=self.device)
+            clean_images, clean_labels = next(self.cls_dataloader)
+            noised_images, noised_labels = clean_images, clean_labels
+
+            noised_timesteps, weights = self.schedule_sampler.sample(noised_images.shape[0], self.device)
+            clean_timesteps = torch.zeros(clean_images.shape[0], dtype=torch.long, device=self.device)
+
+            cls_images = torch.cat([clean_images, noised_images], dim=0)
+            cls_labels = torch.cat([clean_labels, noised_labels], dim=0).argmax(dim=1)
+            timesteps = torch.cat([clean_timesteps, noised_timesteps], dim=0)
+
             sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
 
             with self.accelerator.no_sync(self.net):
                 cls_images = get_patches(cls_images, self.img_resolution)
                 logits = self.net(cls_images, timesteps, cls_mode=True)
 
-                cls_labels = cls_labels.argmax(dim=1)
                 ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
                 acc = (logits.argmax(dim=1) == cls_labels).float().mean()
                 ece = self.ece_criterion(logits, cls_labels)
