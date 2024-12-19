@@ -1,9 +1,9 @@
 # Description: Gaussian diffusion utility for the diffusion models.
 
-import numpy as np
-import torch
 import math
 
+import numpy as np
+import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -158,12 +158,16 @@ class DDIMSampler(torch.nn.Module):
         sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
         epsilon_t = torch.randn_like(x_t)
         x_t_minus_one = (
-            torch.sqrt(alpha_t_prev / alpha_t) * x_t + (torch.sqrt(1 - alpha_t_prev - sigma_t**2) - torch.sqrt((alpha_t_prev * (1 - alpha_t)) / alpha_t)) * epsilon_theta_t + sigma_t * epsilon_t
+            torch.sqrt(alpha_t_prev / alpha_t) * x_t
+            + (torch.sqrt(1 - alpha_t_prev - sigma_t**2) - torch.sqrt((alpha_t_prev * (1 - alpha_t)) / alpha_t)) * epsilon_theta_t
+            + sigma_t * epsilon_t
         )
         return x_t_minus_one
 
     @torch.no_grad()
-    def sample_one_step_v(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, clip_denoised: bool = True, clip_value: int = 3):
+    def sample_one_step_v(
+        self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, clip_denoised: bool = True, clip_value: int = 3
+    ):
         t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
         prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
 
@@ -194,6 +198,29 @@ class DDIMSampler(torch.nn.Module):
             pred += torch.randn_like(pred) * ddim_sigma
 
         return pred
+
+    @torch.no_grad()
+    def sample_one_step_x_0(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float):
+        t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
+        prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
+
+        # Get current and previous alpha_cumprod
+        alpha_t = extract(self.alpha_t_bar, t, x_t.shape)
+        alpha_t_prev = extract(self.alpha_t_bar, prev_t, x_t.shape)
+
+        # Predict x_0 using the model
+        x_0 = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
+
+        # Compute x_{t-1} using the predicted x_0
+        sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
+        epsilon_t = torch.randn_like(x_t)
+        x_t_minus_one = (
+            torch.sqrt(alpha_t_prev) * x_0
+            + torch.sqrt(1 - alpha_t_prev - sigma_t**2) * ((x_t - torch.sqrt(alpha_t) * x_0) / torch.sqrt(1 - alpha_t))
+            + sigma_t * epsilon_t
+        )
+
+        return x_t_minus_one
 
     @torch.no_grad()
     def forward(self, x_t, pos, class_labels, steps: int = 1, method="linear", eta=0.0, only_return_x_0: bool = True, interval: int = 1):
@@ -235,6 +262,8 @@ class DDIMSampler(torch.nn.Module):
                     x_t = self.sample_one_step_v(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta)
                 elif self.target == "epsilon":
                     x_t = self.sample_one_step(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta)
+                elif self.target == "x_0":
+                    x_t = self.sample_one_step_x_0(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta)
                 else:
                     raise NotImplementedError(f"target {self.target} is not implemented!")
 
@@ -315,7 +344,10 @@ class GaussianDiffusion:
             Diffused samples at timestep `t`
         """
         x_start_shape = x_start.shape
-        return self._extract(self.sqrt_alphas_cumprod, t, x_start_shape) * x_start + self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_start_shape) * noise
+        return (
+            self._extract(self.sqrt_alphas_cumprod, t, x_start_shape) * x_start
+            + self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_start_shape) * noise
+        )
 
     def mean_flat(self, tensor):
         """
@@ -348,7 +380,9 @@ class GaussianDiffusion:
 
     def predict_start_from_noise(self, x_t, t, noise):
         x_t_shape = x_t.shape
-        return self._extract(self.sqrt_recip_alphas_cumprod, t, x_t_shape) * x_t - self._extract(self.sqrt_recipm1_alphas_cumprod, t, x_t_shape) * noise
+        return (
+            self._extract(self.sqrt_recip_alphas_cumprod, t, x_t_shape) * x_t - self._extract(self.sqrt_recipm1_alphas_cumprod, t, x_t_shape) * noise
+        )
 
     def q_posterior(self, x_start, x_t, t):
         """Compute the mean and variance of the diffusion
@@ -363,7 +397,9 @@ class GaussianDiffusion:
         """
 
         x_t_shape = x_t.shape
-        posterior_mean = self._extract(self.posterior_mean_coef1, t, x_t_shape) * x_start + self._extract(self.posterior_mean_coef2, t, x_t_shape) * x_t
+        posterior_mean = (
+            self._extract(self.posterior_mean_coef1, t, x_t_shape) * x_start + self._extract(self.posterior_mean_coef2, t, x_t_shape) * x_t
+        )
         posterior_variance = self._extract(self.posterior_variance, t, x_t_shape)
         posterior_log_variance_clipped = self._extract(self.posterior_log_variance_clipped, t, x_t_shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
