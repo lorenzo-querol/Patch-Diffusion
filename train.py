@@ -57,7 +57,7 @@ def parse_int_list(s):
 # Diffusion-related.
 @click.option("--schedule_name", help="Diffusion schedule", metavar="str", type=click.Choice(["linear", "cosine"]), show_default=True)
 @click.option("--timesteps", help="Number of diffusion timesteps", metavar="INT", type=click.IntRange(min=1), default=1000, show_default=True)
-@click.option("--target", help="Target value for diffusion", metavar="str", type=click.Choice(["eps", "x0", "v"]), default="eps", show_default=True)
+@click.option("--target", help="Target value for diffusion", metavar="str", type=click.Choice(["epsilon", "x_0", "v"]), default="eps", show_default=True)
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
@@ -107,7 +107,8 @@ def main(**kwargs):
         pool="sattn",
     )
     trainer_kwargs.diffusion_kwargs = dnnlib.EasyDict(
-        class_name="training.diffusion.GaussianDiffusion",
+        class_name="training.diffusion.GaussianDiffusionTrainer",
+        target=opts.target,
         schedule_name=opts.schedule_name,
         timesteps=opts.timesteps,
     )

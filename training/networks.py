@@ -661,7 +661,7 @@ class EBMUNet(nn.Module):
 
         self.pool = pool
         if pool == "adaptive":
-            self.fc = None
+            self.fc = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
         elif pool == "attn":
             self.fc = nn.Sequential(AttentionPool2d(img_resolution, out_channels, out_channels, label_dim))
         elif pool == "sattn":
@@ -701,15 +701,12 @@ class EBMUNet(nn.Module):
             h = h.type(x.dtype)
             out = self.out(h)
 
-            # out = F.avg_pool2d(out, (out.size(2), out.size(3)))
-            # out = out.view(out.size(0), -1)
-
             return self.fc(out)
         else:
             with torch.enable_grad():
                 hs = []
                 emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-                if self.label_dim is not None:
+                if self.label_dim is not None and class_labels is not None:
                     context = self.label_emb(class_labels)
                     context = context[:, None, ...]
                 else:

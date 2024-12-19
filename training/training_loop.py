@@ -73,7 +73,7 @@ class Trainer:
         ce_weight=0.001,  # Weight of the classification loss
         label_smooth=0.2,  # Label smoothing factor
         real_p=0.5,  # Probability of real images
-        target="eps",  # Target for the diffusion model
+        target="epsilon",  # Target for the diffusion model
         train_on_latents=False,  # Train on latent representations
         seed=1,  # Seed for reproducibility
         resume_from=None,  # Checkpoint to resume from
@@ -235,14 +235,16 @@ class Trainer:
             out_channels=self.label_dim,
             label_dim=self.label_dim,
         )
-        self.diffusion = dnnlib.util.construct_class_by_name(**self.diffusion_kwargs)
-        self.schedule_sampler = UniformSampler(self.diffusion)
+        self.diffusion = dnnlib.util.construct_class_by_name(**self.diffusion_kwargs, model=self.net)
+        sampler_kwargs = copy.deepcopy(self.diffusion_kwargs)
+        sampler_kwargs.update({"class_name": "training.diffusion.DDIMSampler"})
 
         # ---------------------------------------------------------------------
         """ Setup EMA """
         self.print_fn("Setting up EMA...")
         if self.accelerator.is_main_process:
-            self.ema = EMA(self.net, beta=0.999)
+            self.ema = EMA(self.net)
+            self.sampler = dnnlib.util.construct_class_by_name(**sampler_kwargs, model=self.ema)
 
         # ---------------------------------------------------------------------
         """ Setup the optimizer """
@@ -263,8 +265,9 @@ class Trainer:
 
         # ---------------------------------------------------------------------
         """ Prepare for distributed training """
-        self.net, self.optimizer, self.scheduler = self.accelerator.prepare(
+        self.net, self.diffusion, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.net,
+            self.diffusion,
             self.optimizer,
             self.scheduler,
         )
@@ -292,15 +295,12 @@ class Trainer:
         y_pos = (y_pos / (resolution - 1) - 0.5) * 2.0
 
         pos = torch.stack([x_pos, y_pos], dim=0).to(self.device)
-        shape = (num_images, self.img_channels, self.img_resolution, self.img_resolution)
         pos = pos.unsqueeze(0).repeat(num_images, 1, 1, 1)
+        shape = (num_images, self.img_channels, self.img_resolution, self.img_resolution)
+        x_0 = torch.randn(shape, device=self.device)
         class_labels = torch.randint(0, self.label_dim, (num_images,), device=self.device)
 
-        if self.target == "v":
-            samples = self.diffusion.sample_images_ddim_v(self.ema, shape, pos, class_labels, self.device, timesteps=20)
-        else:
-            samples = self.diffusion.sample_images_ddim(self.ema, shape, pos, class_labels, self.device, timesteps=20)
-
+        samples = self.sampler(x_0, pos, class_labels, steps=100)
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
         torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
 
@@ -342,23 +342,11 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.ce_weight > 0:
-            clean_images, clean_labels = next(self.cls_dataloader)
-            noised_images, noised_labels = clean_images, clean_labels
-
-            noised_timesteps, weights = self.schedule_sampler.sample(noised_images.shape[0], self.device)
-            clean_timesteps = torch.zeros(clean_images.shape[0], dtype=torch.long, device=self.device)
-
-            cls_images = torch.cat([clean_images, noised_images], dim=0)
-            cls_labels = torch.cat([clean_labels, noised_labels], dim=0).argmax(dim=1)
-            timesteps = torch.cat([clean_timesteps, noised_timesteps], dim=0)
-
-            sqrt_alphas_cumprod = torch.from_numpy(self.diffusion.sqrt_alphas_cumprod).to(self.device)[timesteps].float()
+            cls_images, cls_labels = next(self.cls_dataloader)
+            cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
 
             with self.accelerator.no_sync(self.net):
-                cls_images = get_patches(cls_images, self.img_resolution)
-                logits = self.net(cls_images, timesteps, cls_mode=True)
-
-                ce_loss = (self.criterion(logits, cls_labels) * sqrt_alphas_cumprod).mean()
+                logits, ce_loss, weighted_ce_loss = self.diffusion(cls_images, cls_labels, cls_mode=True)
                 acc = (logits.argmax(dim=1) == cls_labels).float().mean()
                 ece = self.ece_criterion(logits, cls_labels)
 
@@ -366,30 +354,14 @@ class Trainer:
                 metrics["cls_acc"] = acc
                 metrics["cls_ece"] = ece
 
-                self.accelerator.backward(self.ce_weight * ce_loss)
+                self.accelerator.backward(self.ce_weight * weighted_ce_loss)
 
         patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
         batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
         images, labels = get_batch_data(self.train_dataloader, self.device, batch_mul)
+        images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
 
-        timesteps, weights = self.schedule_sampler.sample(images.shape[0], self.device)
-        images = get_patches(images, patch_size)
-        labels = labels.argmax(dim=1)
-
-        # NOTE: This is a Classifier-Free Guidance (CFG) technique.
-        # Set some labels to a negative/null class (i.e., does not exist)
-        mask = torch.rand(labels.shape[0], device=self.device) < 0.1
-        labels[mask] = self.label_dim
-
-        mse_loss = self.diffusion.training_losses(
-            net=self.net,
-            x_start=images,
-            t=timesteps,
-            target=self.target,
-            model_kwargs={"class_labels": labels},
-        )
-
-        mse_loss = (mse_loss * weights).mean()
+        mse_loss = self.diffusion(images, labels)
         metrics["mse_loss"] = mse_loss
 
         self.accelerator.backward(mse_loss / batch_mul)
@@ -403,7 +375,6 @@ class Trainer:
 
         metrics["grad_norm"] = grad_norm
         metrics["param_norm"] = param_norm
-        metrics["lr"] = torch.tensor(self.scheduler.get_last_lr()[0], device=self.device)
 
         self._update_ema()
 
