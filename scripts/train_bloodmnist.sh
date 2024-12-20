@@ -15,6 +15,7 @@ accelerate launch train.py \
     --batch_size=128 \
     --cond=1 \
     --num_steps=200000 \
+    --accum_steps=4 \
     --model_channels=128 \
     --channel_mult=1,2,2,2 \
     --num_res_blocks=3 \

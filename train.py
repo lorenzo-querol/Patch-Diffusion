@@ -43,6 +43,9 @@ def parse_int_list(s):
 @click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=128, show_default=True)
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
 @click.option("--num_steps", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=100000, show_default=True)
+@click.option(
+    "--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True
+)
 @click.option("--resume_from", help="Resume from a previous checkpoint", metavar="DIR", type=str, default=None)
 
 # Hyperparameters.
@@ -57,16 +60,27 @@ def parse_int_list(s):
 # Diffusion-related.
 @click.option("--schedule_name", help="Diffusion schedule", metavar="str", type=click.Choice(["linear", "cosine"]), show_default=True)
 @click.option("--timesteps", help="Number of diffusion timesteps", metavar="INT", type=click.IntRange(min=1), default=1000, show_default=True)
-@click.option("--target", help="Target value for diffusion", metavar="str", type=click.Choice(["epsilon", "x_0", "v"]), default="eps", show_default=True)
+@click.option(
+    "--target", help="Target value for diffusion", metavar="str", type=click.Choice(["epsilon", "x_0", "v"]), default="eps", show_default=True
+)
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
 @click.option("--label_smooth", help="Label smoothing", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
-@click.option("--eval_interval", help="How often to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=1), default=100, show_default=True)
+@click.option(
+    "--eval_interval",
+    help="How often to evaluate the model on the test dataset",
+    metavar="TICKS",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+)
 
 # I/O-related.
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
-@click.option("--log_interval", help="How often to log the training metrics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
+@click.option(
+    "--log_interval", help="How often to log the training metrics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True
+)
 @click.option("--save_interval", help="How often to save the model", metavar="TICKS", type=click.IntRange(min=1), default=5000, show_default=True)
 def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
@@ -116,6 +130,7 @@ def main(**kwargs):
     trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
     trainer_kwargs.scheduler_kwargs = dnnlib.EasyDict(class_name="torch.optim.lr_scheduler.LambdaLR")
     trainer_kwargs.num_steps = opts.num_steps
+    trainer_kwargs.accum_steps = opts.accum_steps
     trainer_kwargs.lr_warmup = opts.lr_warmup
     trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.ce_weight = opts.ce_weight
@@ -145,6 +160,11 @@ def main(**kwargs):
     print_fn(f"Batch size:              {trainer_kwargs.batch_size}")
     print_fn(f"Diffusion schedule:      {trainer_kwargs.diffusion_kwargs.schedule_name}")
     print_fn(f"Timesteps:               {trainer_kwargs.diffusion_kwargs.timesteps}")
+    print_fn(f"Target:                  {trainer_kwargs.target}")
+    print_fn(f"Number of training steps: {trainer_kwargs.num_steps}")
+    print_fn(f"Resume from:              {trainer_kwargs.resume_from}")
+    print_fn(f"Random seed:             {trainer_kwargs.seed}")
+    print_fn(f"Accumulation steps:      {trainer_kwargs.accum_steps}")
     print_fn(f"Number of GPUs:          {accelerator.num_processes}")
     print_fn()
 

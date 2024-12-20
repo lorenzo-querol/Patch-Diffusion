@@ -68,6 +68,7 @@ class Trainer:
         optimizer_kwargs={},  # Optimizer options
         scheduler_kwargs={},  # Scheduler options
         num_steps=100,  # Number of training steps
+        accum_steps=1,  # Accumulate gradients over multiple steps
         lr_warmup=0,  # Number of warmup steps for the learning rate
         batch_size=128,  # Batch size
         ce_weight=0.001,  # Weight of the classification loss
@@ -87,6 +88,7 @@ class Trainer:
         self.scheduler_kwargs = scheduler_kwargs
 
         self.num_steps = num_steps
+        self.accum_steps = accum_steps
         self.lr_warmup = lr_warmup
         self.ce_weight = ce_weight
         self.label_smooth = label_smooth
@@ -101,7 +103,7 @@ class Trainer:
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
         self.ece_criterion = ECELoss(n_bins=10)
 
-        self.accelerator = Accelerator(log_with="wandb")
+        self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.accum_steps)
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
         self.per_device_batch_size = self._calculate_per_device_batch_size()
@@ -111,7 +113,9 @@ class Trainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert (
+            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
+        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _init_trainer(self):
