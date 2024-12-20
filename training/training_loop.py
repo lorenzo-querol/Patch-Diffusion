@@ -369,7 +369,9 @@ class Trainer:
         metrics["mse_loss"] = mse_loss
 
         self.accelerator.backward(mse_loss / batch_mul)
-        self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+
+        if self.accelerator.sync_gradients:
+            self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
 
         self.accelerator.wait_for_everyone()
         self.optimizer.step()
