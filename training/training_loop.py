@@ -300,7 +300,7 @@ class Trainer:
         x_0 = torch.randn(shape, device=self.device)
         class_labels = torch.randint(0, self.label_dim, (num_images,), device=self.device)
 
-        samples = self.sampler(x_0, pos, class_labels, steps=100)
+        samples = self.sampler(x_0, pos, class_labels, steps=10, guidance_scale=3.0)
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
         torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
 

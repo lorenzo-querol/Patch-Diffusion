@@ -143,7 +143,7 @@ class DDIMSampler(torch.nn.Module):
         self.register_buffer("noise_rate", torch.sqrt(1.0 - self.alpha_t_bar))
 
     @torch.no_grad()
-    def sample_one_step(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float):
+    def sample_one_step(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0):
         t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
         prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
 
@@ -154,6 +154,12 @@ class DDIMSampler(torch.nn.Module):
         # predict noise using model
         epsilon_theta_t = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
 
+        # Classifier-Free Guidance
+        if guidance_scale > 1.0:
+            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
+            epsilon_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
+            epsilon_theta_t = epsilon_uncond + guidance_scale * (epsilon_theta_t - epsilon_uncond)
+
         # calculate x_{t-1}
         sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
         epsilon_t = torch.randn_like(x_t)
@@ -163,7 +169,32 @@ class DDIMSampler(torch.nn.Module):
         return x_t_minus_one
 
     @torch.no_grad()
-    def sample_one_step_v(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, clip_denoised: bool = True, clip_value: int = 3):
+    def sample_one_step_x_0(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0):
+        t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
+        prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
+
+        # Get current and previous alpha_cumprod
+        alpha_t = extract(self.alpha_t_bar, t, x_t.shape)
+        alpha_t_prev = extract(self.alpha_t_bar, prev_t, x_t.shape)
+
+        # Predict x_0 using the model
+        x_0 = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
+
+        # Classifier-Free Guidance
+        if guidance_scale > 1.0:
+            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
+            x_0_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
+            x_0 = x_0_uncond + guidance_scale * (x_0 - x_0_uncond)
+
+        # Compute x_{t-1} using the predicted x_0
+        sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
+        epsilon_t = torch.randn_like(x_t)
+        x_t_minus_one = torch.sqrt(alpha_t_prev) * x_0 + torch.sqrt(1 - alpha_t_prev - sigma_t**2) * ((x_t - torch.sqrt(alpha_t) * x_0) / torch.sqrt(1 - alpha_t)) + sigma_t * epsilon_t
+
+        return x_t_minus_one
+
+    @torch.no_grad()
+    def sample_one_step_v(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0, clip_denoised: bool = True, clip_value: int = 3):
         t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
         prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
 
@@ -175,6 +206,12 @@ class DDIMSampler(torch.nn.Module):
         sigma_t_prev = extract(1 - self.alpha_t_bar, prev_t, x_t.shape).clip(min=0)
 
         v = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
+
+        # Classifier-Free Guidance
+        if guidance_scale > 1.0:
+            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
+            v_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
+            v = v_uncond + guidance_scale * (v - v_uncond)
 
         pred = x_t * alpha_t - v * sigma_t
 
@@ -196,13 +233,14 @@ class DDIMSampler(torch.nn.Module):
         return pred
 
     @torch.no_grad()
-    def forward(self, x_t, pos, class_labels, steps: int = 1, method="linear", eta=0.0, only_return_x_0: bool = True, interval: int = 1):
+    def forward(self, x_t, pos, class_labels, steps: int = 1, method="linear", eta=0.0, guidance_scale: float = 1.0, only_return_x_0: bool = True, interval: int = 1):
         """
         Parameters:
             x_t: Standard Gaussian noise. A tensor with shape (batch_size, channels, height, width).
             steps: Sampling steps.
             method: Sampling method, can be "linear" or "quadratic".
             eta: Coefficients of sigma parameters in the paper. The value 0 indicates DDIM, 1 indicates DDPM.
+            guidance_scale: Scale for classifier-free guidance.
             only_return_x_0: Determines whether the image is saved during the sampling process. if True,
                 intermediate pictures are not saved, and only return the final result $x_0$.
             interval: This parameter is valid only when `only_return_x_0 = False`. Decide the interval at which
@@ -231,10 +269,12 @@ class DDIMSampler(torch.nn.Module):
         with tqdm(reversed(range(0, steps)), colour="#6565b5", total=steps) as sampling_steps:
             for i in sampling_steps:
 
-                if self.target == "v":
-                    x_t = self.sample_one_step_v(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta)
-                elif self.target == "epsilon":
-                    x_t = self.sample_one_step(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta)
+                if self.target == "epsilon":
+                    x_t = self.sample_one_step(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
+                elif self.target == "x_0":
+                    x_t = self.sample_one_step_x_0(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
+                elif self.target == "v":
+                    x_t = self.sample_one_step_v(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
                 else:
                     raise NotImplementedError(f"target {self.target} is not implemented!")
 

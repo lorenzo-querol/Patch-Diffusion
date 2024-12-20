@@ -11,6 +11,14 @@ python dataset_tool.py --dataset cifar10 \
                        --val_ratio 0.0
 ```
 
+For MedMNIST datasets
+
+```bash
+python dataset_tool.py --dataset bloodmnist \
+                       --dest ./data \
+                       --resolution 64
+```
+
 ### Train Patch EGC
 
 You can train new models using `train.py`. For example with CIFAR10:

@@ -27,3 +27,4 @@ dependencies:
     - imageio-ffmpeg
     - pyspng
     - ema-pytorch>=0.4.2 # added this line
+    - medmnist # added this line
