@@ -1,9 +1,9 @@
 # Description: Gaussian diffusion utility for the diffusion models.
 
-import numpy as np
-import torch
 import math
 
+import numpy as np
+import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
