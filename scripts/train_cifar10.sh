@@ -24,10 +24,12 @@ accelerate launch train.py \
     --lr_warmup=0 \
     --schedule_name=cosine \
     --timesteps=1000 \
+    --accum_steps=1 \
     --target=epsilon \
     --ce_weight=0.001 \
     --label_smooth=0 \
     --seed=1 \
     --log_interval=10 \
     --eval_interval=1000 \
-    --save_interval=5000
+    --save_interval=5000 \
+    --resume_from=training-runs/00044-run/model-110000.pt

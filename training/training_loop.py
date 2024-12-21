@@ -113,9 +113,7 @@ class Trainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert (
-            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
-        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _init_trainer(self):
@@ -127,6 +125,10 @@ class Trainer:
 
         if self.resume_from is not None:
             self._load()
+
+        # NOTE: We need to initialize the diffusion model after loading the checkpoint if it exists
+        self.diffusion = dnnlib.util.construct_class_by_name(**self.diffusion_kwargs, model=self.net)
+        self.diffusion = self.accelerator.prepare(self.diffusion)
 
     def _init_env(self):
         set_seed(self.seed)
@@ -239,7 +241,7 @@ class Trainer:
             out_channels=self.label_dim,
             label_dim=self.label_dim,
         )
-        self.diffusion = dnnlib.util.construct_class_by_name(**self.diffusion_kwargs, model=self.net)
+
         sampler_kwargs = copy.deepcopy(self.diffusion_kwargs)
         sampler_kwargs.update({"class_name": "training.diffusion.DDIMSampler"})
 
@@ -269,14 +271,13 @@ class Trainer:
 
         # ---------------------------------------------------------------------
         """ Prepare for distributed training """
-        self.net, self.diffusion, self.optimizer, self.scheduler = self.accelerator.prepare(
+        self.net, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.net,
-            self.diffusion,
             self.optimizer,
             self.scheduler,
         )
 
-        # BUG: Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to True!!
+        # NOTE (BUG): Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to true!
         self._set_requires_grad(self.net, True)
 
     def _update_ema(self):
@@ -464,7 +465,7 @@ class Trainer:
 
         self.print_fn(f"Resuming from {ckpt}...")
 
-        data = torch.load(ckpt, map_location=self.device, weights_only=True)
+        data = torch.load(ckpt, weights_only=True)
 
         self.cur_step = data["step"]
         self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
