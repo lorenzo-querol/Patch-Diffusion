@@ -3,16 +3,14 @@ import os
 from typing import Callable, Optional, Tuple, Union
 
 import click
+import medmnist
 import numpy as np
 import PIL.Image
 import torch
 import torchvision
 import torchvision.transforms as transforms
-from tqdm import tqdm
-
-import medmnist
 from medmnist import INFO
-
+from tqdm import tqdm
 
 # ----------------------------------------------------------------------------
 
@@ -53,7 +51,7 @@ def save_dataset(images, labels, dest):
 @click.option("--dataset", help="Dataset to download and process", required=True)
 @click.option("--dest", help="Output directory or archive name", metavar="PATH", type=str, required=True)
 @click.option("--val_ratio", help="Ratio of validation set (0.0-1.0). If 0 or None, no validation set is created", type=float, default=0.0)
-@click.option("--resolution", help="Resolution of the images", type=int, default=28)
+@click.option("--resolution", help="Resolution of the images", type=int, default=None)
 def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
 
     validset = None
@@ -96,6 +94,10 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
 
     test_images = np.array([img.numpy() for img, _ in testset])
     test_labels = np.array([label for _, label in testset])
+
+    if resolution is not None:
+        train_name = f"{dataset}_{resolution}"
+        dataset = train_name
 
     save_dataset(train_images, train_labels, os.path.join(dest, dataset, "train"))
 
