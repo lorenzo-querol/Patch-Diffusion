@@ -66,13 +66,10 @@ class Trainer:
         network_kwargs={},  # Model options
         diffusion_kwargs={},  # Diffusion options
         optimizer_kwargs={},  # Optimizer options
-        scheduler_kwargs={},  # Scheduler options
         num_steps=100,  # Number of training steps
         accum_steps=1,  # Accumulate gradients over multiple steps
-        lr_warmup=0,  # Number of warmup steps for the learning rate
         batch_size=128,  # Batch size
         ce_weight=0.001,  # Weight of the classification loss
-        label_smooth=0.2,  # Label smoothing factor
         real_p=0.5,  # Probability of real images
         target="epsilon",  # Target for the diffusion model
         train_on_latents=False,  # Train on latent representations
@@ -85,13 +82,10 @@ class Trainer:
         self.network_kwargs = network_kwargs
         self.diffusion_kwargs = diffusion_kwargs
         self.optimizer_kwargs = optimizer_kwargs
-        self.scheduler_kwargs = scheduler_kwargs
 
         self.num_steps = num_steps
         self.accum_steps = accum_steps
-        self.lr_warmup = lr_warmup
         self.ce_weight = ce_weight
-        self.label_smooth = label_smooth
         self.real_p = real_p
         self.target = target
         self.train_on_latents = train_on_latents
@@ -100,7 +94,7 @@ class Trainer:
         self.batch_size = batch_size
         self.cur_step = 0
 
-        self.criterion = torch.nn.CrossEntropyLoss(reduction="none", label_smoothing=self.label_smooth)
+        self.criterion = torch.nn.CrossEntropyLoss(reduction="none")
         self.ece_criterion = ECELoss(n_bins=10)
 
         self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.accum_steps)
@@ -113,7 +107,9 @@ class Trainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert (
+            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
+        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _init_trainer(self):
@@ -266,32 +262,24 @@ class Trainer:
         """ Setup EMA """
         self.print_fn("Setting up EMA...")
         if self.accelerator.is_main_process:
-            self.ema = EMA(self.net)
+            self.ema = EMA(
+                self.net,
+                beta=0.9999,  # Choose your decay rate directly
+                update_every=1,  # Update every step
+                power=3 / 4,  # Optional: can help stabilize training
+            )
             self.sampler = dnnlib.util.construct_class_by_name(**sampler_kwargs, model=self.ema)
 
         # ---------------------------------------------------------------------
         """ Setup the optimizer """
         self.print_fn("Setting up optimizer...")
-
-        def lambda_lr_warmup(step):
-            if self.lr_warmup == 0:
-                return 1.0
-
-            return min(1.0, step / self.lr_warmup)
-
         self.optimizer = dnnlib.util.construct_class_by_name(params=self.net.parameters(), **self.optimizer_kwargs)
-        self.scheduler = dnnlib.util.construct_class_by_name(
-            optimizer=self.optimizer,
-            lr_lambda=lambda_lr_warmup,
-            **self.scheduler_kwargs,
-        )
 
         # ---------------------------------------------------------------------
         """ Prepare for distributed training """
-        self.net, self.optimizer, self.scheduler = self.accelerator.prepare(
+        self.net, self.optimizer = self.accelerator.prepare(
             self.net,
             self.optimizer,
-            self.scheduler,
         )
 
         # NOTE (BUG): Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to true!
@@ -393,7 +381,6 @@ class Trainer:
 
         self.accelerator.wait_for_everyone()
         self.optimizer.step()
-        self.scheduler.step()
 
         grad_norm, param_norm = self._compute_norms()
 
@@ -462,7 +449,6 @@ class Trainer:
             "step": self.cur_step,
             "net": self.accelerator.unwrap_model(self.net).state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
             "ema": self.ema.state_dict(),
         }
 
@@ -487,7 +473,6 @@ class Trainer:
         self.cur_step = data["step"]
         self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
         self.optimizer.load_state_dict(data["optimizer"])
-        self.scheduler.load_state_dict(data["scheduler"])
 
         if self.accelerator.is_main_process:
             self.ema.load_state_dict(data["ema"])

@@ -55,7 +55,6 @@ def parse_int_list(s):
 @click.option("--attn_resolutions", help="Resolutions to use attention layers", metavar="LIST", type=parse_int_list)
 @click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), show_default=True)
 @click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=1e-4, show_default=True)
-@click.option("--lr_warmup", help="Warmup learning rate", metavar="FLOAT", default=0, show_default=True)
 
 # Diffusion-related.
 @click.option("--schedule_name", help="Diffusion schedule", metavar="str", type=click.Choice(["linear", "cosine"]), show_default=True)
@@ -66,7 +65,6 @@ def parse_int_list(s):
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
-@click.option("--label_smooth", help="Label smoothing", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.0, show_default=True)
 @click.option(
     "--eval_interval",
     help="How often to evaluate the model on the test dataset",
@@ -127,14 +125,11 @@ def main(**kwargs):
         timesteps=opts.timesteps,
     )
     trainer_kwargs.target = opts.target
-    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
-    trainer_kwargs.scheduler_kwargs = dnnlib.EasyDict(class_name="torch.optim.lr_scheduler.LambdaLR")
+    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=1e-4)
     trainer_kwargs.num_steps = opts.num_steps
     trainer_kwargs.accum_steps = opts.accum_steps
-    trainer_kwargs.lr_warmup = opts.lr_warmup
     trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.ce_weight = opts.ce_weight
-    trainer_kwargs.label_smooth = opts.label_smooth
     trainer_kwargs.train_on_latents = opts.train_on_latents
     trainer_kwargs.seed = opts.seed
     trainer_kwargs.resume_from = opts.resume_from
