@@ -16,7 +16,7 @@ For MedMNIST datasets
 ```bash
 python dataset_tool.py --dataset bloodmnist \
                        --dest ./data \
-                       --resolution 64
+                       --resolution 224
 ```
 
 ### Train Patch EGC

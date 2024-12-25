@@ -196,9 +196,10 @@ class Trainer:
     def _prepare_patch_info(self):
         real_p = self.real_p
         img_resolution = self.img_resolution
-        is_smaller_than_64 = self.img_resolution == 32
+        is_32 = self.img_resolution == 32
+        is_224 = self.img_resolution == 224
 
-        if is_smaller_than_64:
+        if is_32:
             batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
             if self.real_p < 1.0:
                 p_list = np.array([(1 - real_p), real_p])
@@ -208,7 +209,18 @@ class Trainer:
                 p_list = np.array([0, 1.0])
                 patch_list = np.array([16, 32])
                 batch_mul_avg = 1
+        elif is_224:
+            batch_mul_dict = {224: 1, 112: 2, 56: 4, 28: 8, 14: 16}
+            if self.train_on_latents:
+                p_list = np.array([(1 - real_p), real_p])
+                patch_list = np.array([img_resolution // 2, img_resolution])
+                batch_mul_avg = np.sum(p_list * np.array([2, 1]))
+            else:
+                p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
+                patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
+                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))
         else:
+            """Default options for Patch Diffusion"""
             batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
             if self.train_on_latents:
                 p_list = np.array([(1 - real_p), real_p])
@@ -217,7 +229,12 @@ class Trainer:
             else:
                 p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
                 patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
-                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))  # 2
+                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))
+
+        self.p_list = p_list
+        self.patch_list = patch_list
+        self.batch_mul_dict = batch_mul_dict
+        self.batch_mul_avg = batch_mul_avg
 
         self.p_list = p_list
         self.patch_list = patch_list
