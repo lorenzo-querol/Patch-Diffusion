@@ -713,7 +713,8 @@ class EBMUNet(nn.Module):
                     context = None
 
                 # Only make image require gradients
-                images, coords = x[:, :3], x[:, 3:].detach()
+                num_channels = x.shape[1] - 2  # Subtract 2 for position coordinates
+                images, coords = x[:, :num_channels], x[:, num_channels:].detach()
                 input_tensor = torch.autograd.Variable(images, requires_grad=True)
 
                 # Recombine for forward pass

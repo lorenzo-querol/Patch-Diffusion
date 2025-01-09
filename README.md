@@ -8,7 +8,7 @@ For CIFAR10/100 dataset, you can use the following commands.
 # Example: 20% of the training data will be used as validation set if val_ratio is set to 0.2
 python dataset_tool.py --dataset cifar10 \
                        --dest ./data \
-                       --val_ratio 0.0
+                       --val_ratio 0.1
 ```
 
 For MedMNIST datasets
@@ -16,7 +16,7 @@ For MedMNIST datasets
 ```bash
 python dataset_tool.py --dataset bloodmnist \
                        --dest ./data \
-                       --resolution 224
+                       --resolution 28
 ```
 
 ### Train Patch EGC

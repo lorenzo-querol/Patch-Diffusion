@@ -108,8 +108,8 @@ class GaussianDiffusionTrainer(torch.nn.Module):
         else:
             # NOTE: This is a Classifier-Free Guidance (CFG) technique.
             # Set some labels to a negative/null class (i.e., does not exist)
-            # mask = torch.rand(y.shape[0], device=y.device) < 0.1
-            # y[mask] = self.model.label_dim
+            mask = torch.rand(y.shape[0], device=y.device) < 0.1
+            y[mask] = self.model.label_dim
 
             # get a random training step $t \sim Uniform({1, ..., T})$
             t = torch.randint(self.T, size=(x_0.shape[0],), device=x_0.device)
@@ -120,7 +120,8 @@ class GaussianDiffusionTrainer(torch.nn.Module):
 
             x_t = self.sample_q(x_0, t, epsilon)
             output = self.model(x_t, t, class_labels=y)
-            loss = F.mse_loss(output, target[:, :3])
+            num_channels = output.shape[1]
+            loss = F.mse_loss(output, target[:, :num_channels])
 
             return loss
 

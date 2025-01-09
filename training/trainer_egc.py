@@ -11,11 +11,8 @@ from diffusers import AutoencoderKL
 from ema_pytorch import EMA
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from tqdm import tqdm
 
 import dnnlib
-from calibration.ece import ECE
-from training.resample import UniformSampler
 
 from .ece import ECELoss
 from .patch import get_patches
@@ -66,7 +63,7 @@ class Trainer:
         network_kwargs={},  # Model options
         diffusion_kwargs={},  # Diffusion options
         optimizer_kwargs={},  # Optimizer options
-        num_steps=100,  # Number of training steps
+        num_steps=100000,  # Number of training steps
         accum_steps=1,  # Accumulate gradients over multiple steps
         batch_size=128,  # Batch size
         ce_weight=0.001,  # Weight of the classification loss
@@ -107,17 +104,15 @@ class Trainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert (
-            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
-        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _init_trainer(self):
         """Initialize the Trainer: seeds, datasets, and network."""
         self._init_env()
         self._prepare_dataloaders()
-        self._prepare_patch_info()
         self._build_network_and_diffusion()
+        self._prepare_patch_info()
 
         if self.resume_from is not None:
             self._load()
@@ -161,7 +156,7 @@ class Trainer:
         self.train_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=transform)
         self.cls_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=augment_transform)
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
-        dataloader_kwargs = dict(
+        self.dataloader_kwargs = dict(
             batch_size=self.per_device_batch_size,
             drop_last=True,
             pin_memory=True,
@@ -169,8 +164,8 @@ class Trainer:
             shuffle=True,
             generator=torch.Generator().manual_seed(self.seed),
         )
-        self.train_dataloader = DataLoader(self.train_dataset, **dataloader_kwargs)
-        self.cls_dataloader = DataLoader(self.cls_dataset, **dataloader_kwargs)
+        self.train_dataloader = DataLoader(self.train_dataset, **self.dataloader_kwargs)
+        self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
         self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
         self.train_dataloader, self.cls_dataloader, self.val_dataloader = self.accelerator.prepare(
@@ -193,49 +188,33 @@ class Trainer:
         real_p = self.real_p
         img_resolution = self.img_resolution
         is_32 = self.img_resolution == 32
-        is_224 = self.img_resolution == 224
 
         if is_32:
             batch_mul_dict = {32: 1, 16: 4}  # Simplified multipliers for 32x32
             if self.real_p < 1.0:
                 p_list = np.array([(1 - real_p), real_p])
                 patch_list = np.array([16, 32])  # Only two patch sizes for 32x32
-                batch_mul_avg = np.sum(p_list * np.array([4, 1]))
             else:
                 p_list = np.array([0, 1.0])
                 patch_list = np.array([16, 32])
-                batch_mul_avg = 1
-        elif is_224:
-            batch_mul_dict = {224: 1, 112: 2, 56: 4, 28: 8, 14: 16}
-            if self.train_on_latents:
-                p_list = np.array([(1 - real_p), real_p])
-                patch_list = np.array([img_resolution // 2, img_resolution])
-                batch_mul_avg = np.sum(p_list * np.array([2, 1]))
-            else:
-                p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
-                patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
-                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))
         else:
             """Default options for Patch Diffusion"""
             batch_mul_dict = {512: 1, 256: 2, 128: 4, 64: 16, 32: 32, 16: 64}
+
             if self.train_on_latents:
                 p_list = np.array([(1 - real_p), real_p])
                 patch_list = np.array([img_resolution // 2, img_resolution])
-                batch_mul_avg = np.sum(p_list * np.array([2, 1]))
             else:
                 p_list = np.array([(1 - real_p) * 2 / 5, (1 - real_p) * 3 / 5, real_p])
                 patch_list = np.array([img_resolution // 4, img_resolution // 2, img_resolution])
-                batch_mul_avg = np.sum(np.array(p_list) * np.array([4, 2, 1]))
 
         self.p_list = p_list
         self.patch_list = patch_list
         self.batch_mul_dict = batch_mul_dict
-        self.batch_mul_avg = batch_mul_avg
 
         self.p_list = p_list
         self.patch_list = patch_list
         self.batch_mul_dict = batch_mul_dict
-        self.batch_mul_avg = batch_mul_avg
 
     def _build_network_and_diffusion(self):
         """Setup network and diffusion"""
@@ -246,6 +225,15 @@ class Trainer:
             attention_ds.append(self.img_resolution // int(res))
 
         self.network_kwargs.update({"attn_resolutions": tuple(attention_ds)})
+
+        if self.train_on_latents:
+            self.img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(self.device)
+            self.img_vae.eval()
+            self._set_requires_grad(self.img_vae, False)
+            self.latent_scale_factor = 0.18215
+            self.img_resolution, self.img_channels = self.img_resolution // 8, 4
+        else:
+            self.img_vae = None
 
         self.net = dnnlib.util.construct_class_by_name(
             **self.network_kwargs,
@@ -264,9 +252,9 @@ class Trainer:
         if self.accelerator.is_main_process:
             self.ema = EMA(
                 self.net,
-                beta=0.9999,  # Choose your decay rate directly
-                update_every=1,  # Update every step
-                power=3 / 4,  # Optional: can help stabilize training
+                beta=0.9999,
+                update_every=1,
+                power=3 / 4,
             )
             self.sampler = dnnlib.util.construct_class_by_name(**sampler_kwargs, model=self.ema)
 
@@ -282,7 +270,7 @@ class Trainer:
             self.optimizer,
         )
 
-        # NOTE (BUG): Acclerate's prepare resets the model to NOT require gradients, so we need to set it back to true!
+        # NOTE (BUG): Accelerate's prepare resets the model to NOT require gradients, so we need to set it back to true!
         self._set_requires_grad(self.net, True)
 
     def _update_ema(self):
@@ -311,10 +299,16 @@ class Trainer:
         class_labels = torch.randint(0, self.label_dim, (num_images,), device=self.device)
 
         samples = self.sampler(x_0, pos, class_labels, steps=10, guidance_scale=3.0)
-        image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
-        torchvision.utils.save_image(image_grid, os.path.join(self.run_dir, f"sample-{self.cur_step}.png"))
 
-    def train(self, log_interval, eval_interval, save_interval):
+        if self.train_on_latents:
+            samples = 1 / 0.18215 * samples
+            samples = self.img_vae.decode(samples.float()).sample
+
+        image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
+        fname = os.path.join(self.run_dir, f"sample-{self.cur_step}.png")
+        torchvision.utils.save_image(image_grid, fname)
+
+    def train(self, log_interval: int, eval_interval: int, save_interval: int):
         """Main training loop.
 
         :param log_interval: When to log the metrics.
@@ -327,7 +321,7 @@ class Trainer:
 
         self.accelerator.init_trackers(project_name="EGC")
 
-        for step in range(self.cur_step, self.num_steps):
+        for step in range(self.cur_step + 1, self.num_steps + 1):
             self.cur_step = step
 
             metrics = self._training_step()
@@ -337,13 +331,13 @@ class Trainer:
                 self.print_fn(f"Step {self.cur_step}/{self.num_steps}")
                 self._report_metrics(metrics)
 
-            if self.ce_weight > 0 and step % eval_interval == 0:
-                metrics = self._evaluate()
+            if eval_interval > 0 and self.cur_step % eval_interval == 0:
+                metrics = self.evaluate()
                 self._report_metrics(metrics)
 
-            if self.cur_step % save_interval == 0:
+            if save_interval > 0 and self.cur_step % save_interval == 0:
                 self.print_fn("Saving model...")
-                self._save()
+                self._save(f"model-{self.cur_step}")
                 self._sample_images()
 
     def _training_step(self):
@@ -353,6 +347,12 @@ class Trainer:
 
         if self.ce_weight > 0:
             cls_images, cls_labels = next(self.cls_dataloader)
+
+            if self.train_on_latents:
+                with torch.no_grad():
+                    cls_images = self.img_vae.encode(cls_images)["latent_dist"].sample()
+                    cls_images = self.latent_scale_factor * cls_images
+
             cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
 
             with self.accelerator.no_sync(self.net):
@@ -368,7 +368,14 @@ class Trainer:
 
         patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
         batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
+
         images, labels = get_batch_data(self.train_dataloader, self.device, batch_mul)
+
+        if self.train_on_latents:
+            with torch.no_grad():
+                images = self.img_vae.encode(images)["latent_dist"].sample()
+                images = self.latent_scale_factor * images
+
         images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
 
         mse_loss = self.diffusion(images, labels)
@@ -383,32 +390,92 @@ class Trainer:
         self.optimizer.step()
 
         grad_norm, param_norm = self._compute_norms()
-
         metrics["grad_norm"] = grad_norm
         metrics["param_norm"] = param_norm
+        metrics["lr"] = torch.tensor(self.optimizer.param_groups[0]["lr"], device=self.device)
 
         self._update_ema()
 
         return metrics
 
-    def _evaluate(self):
+    @torch.no_grad()
+    def evaluate(self, dataloader, return_confidences=False, return_per_class_acc=False):
+        dataloader = self.accelerator.prepare(dataloader)
         metrics = {"val_cls_loss": [], "val_cls_acc": [], "val_cls_ece": []}
+        per_class_acc = None
+        confidences = []
+
+        if return_per_class_acc:
+            per_class_correct = torch.zeros(self.label_dim, device=self.device)
+            per_class_total = torch.zeros(self.label_dim, device=self.device)
 
         self.net.eval()
-        with torch.no_grad():
-            for images, labels in self.val_dataloader:
-                images, labels = images, labels.argmax(dim=1)
-                images = get_patches(images, self.img_resolution)
+        for images, labels in dataloader:
+            labels = labels.argmax(dim=1)
 
-                clean_timesteps = torch.zeros(images.shape[0], dtype=torch.long, device=self.device)
-                logits = self.net(images, clean_timesteps, cls_mode=True)
+            if self.train_on_latents:
+                with torch.no_grad():
+                    images = self.img_vae.encode(images)["latent_dist"].sample()
+                    images = self.latent_scale_factor * images
 
-                metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
-                metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
-                metrics["val_cls_ece"].append(self.ece_criterion(logits, labels))
+            images = get_patches(images, self.img_resolution)
+
+            clean_timesteps = torch.zeros(images.shape[0], dtype=torch.long, device=self.device)
+            logits = self.net(images, clean_timesteps, cls_mode=True)
+
+            metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
+            metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
+            metrics["val_cls_ece"].append(self.ece_criterion(logits, labels))
+
+            if return_confidences:
+                confidences.append(torch.nn.functional.softmax(logits, dim=1))
+
+            if return_per_class_acc:
+                preds = logits.argmax(dim=1)
+                for i in range(self.label_dim):
+                    per_class_correct[i] += (preds[labels == i] == i).sum()
+                    per_class_total[i] += (labels == i).sum()
         self.net.train()
 
-        return {k: torch.stack(v).mean() for k, v in metrics.items()}
+        metrics = {k: torch.stack(v).mean() for k, v in metrics.items()}
+
+        results = [metrics]
+
+        if return_per_class_acc:
+            per_class_acc = per_class_correct / per_class_total
+            per_class_acc = per_class_acc
+            results.append(per_class_acc)
+
+        if return_confidences:
+            confidences = torch.cat(confidences, dim=0)
+            results.append(confidences)
+
+        return results if len(results) > 1 else metrics
+
+    # def evaluate(self):
+    #     metrics = {"val_cls_loss": [], "val_cls_acc": [], "val_cls_ece": []}
+
+    #     self.net.eval()
+    #     with torch.no_grad():
+    #         for images, labels in self.val_dataloader:
+    #             images, labels = images, labels.argmax(dim=1)
+
+    #             if self.train_on_latents:
+    #                 with torch.no_grad():
+    #                     images = self.img_vae.encode(images)["latent_dist"].sample()
+    #                     images = self.latent_scale_factor * images
+
+    #             images = get_patches(images, self.img_resolution)
+
+    #             clean_timesteps = torch.zeros(images.shape[0], dtype=torch.long, device=self.device)
+    #             logits = self.net(images, clean_timesteps, cls_mode=True)
+
+    #             metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
+    #             metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
+    #             metrics["val_cls_ece"].append(self.ece_criterion(logits, labels))
+    #     self.net.train()
+
+    #     return {k: torch.stack(v).mean() for k, v in metrics.items()}
 
     def _compute_norms(self):
         """Compute the gradient and parameter norms."""
@@ -429,7 +496,7 @@ class Trainer:
         """Log the metrics and print them.
 
         Args:
-            metrics (dict): _description_
+            metrics (dict): The metrics to log and print.
         """
         global_metrics = {}
         for name, value in metrics.items():
@@ -441,7 +508,7 @@ class Trainer:
 
         self.accelerator.log(global_metrics, step=self.cur_step)
 
-    def _save(self):
+    def _save(self, filename: str):
         if not self.accelerator.is_main_process:
             return
 
@@ -452,7 +519,7 @@ class Trainer:
             "ema": self.ema.state_dict(),
         }
 
-        torch.save(data, os.path.join(self.run_dir, f"model-{self.cur_step:06d}.pt"))
+        torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
 
     def _load(self):
         """Either load the latest checkpoint from the directory or load the checkpoint from the file

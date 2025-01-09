@@ -7,7 +7,7 @@ import click
 from accelerate import Accelerator
 
 import dnnlib
-from training import training_loop
+from training import trainer_egc
 
 warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.
 
@@ -43,9 +43,7 @@ def parse_int_list(s):
 @click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=128, show_default=True)
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
 @click.option("--num_steps", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=100000, show_default=True)
-@click.option(
-    "--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True
-)
+@click.option("--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--resume_from", help="Resume from a previous checkpoint", metavar="DIR", type=str, default=None)
 
 # Hyperparameters.
@@ -59,9 +57,7 @@ def parse_int_list(s):
 # Diffusion-related.
 @click.option("--schedule_name", help="Diffusion schedule", metavar="str", type=click.Choice(["linear", "cosine"]), show_default=True)
 @click.option("--timesteps", help="Number of diffusion timesteps", metavar="INT", type=click.IntRange(min=1), default=1000, show_default=True)
-@click.option(
-    "--target", help="Target value for diffusion", metavar="str", type=click.Choice(["epsilon", "x_0", "v"]), default="eps", show_default=True
-)
+@click.option("--target", help="Target value for diffusion", metavar="str", type=click.Choice(["epsilon", "x_0", "v"]), default="eps", show_default=True)
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
@@ -76,9 +72,7 @@ def parse_int_list(s):
 
 # I/O-related.
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
-@click.option(
-    "--log_interval", help="How often to log the training metrics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True
-)
+@click.option("--log_interval", help="How often to log the training metrics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
 @click.option("--save_interval", help="How often to save the model", metavar="TICKS", type=click.IntRange(min=1), default=5000, show_default=True)
 def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
@@ -125,7 +119,7 @@ def main(**kwargs):
         timesteps=opts.timesteps,
     )
     trainer_kwargs.target = opts.target
-    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=1e-4)
+    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
     trainer_kwargs.num_steps = opts.num_steps
     trainer_kwargs.accum_steps = opts.accum_steps
     trainer_kwargs.batch_size = opts.batch_size
@@ -177,7 +171,7 @@ def main(**kwargs):
             should_flush=True,
         )
 
-    trainer = training_loop.Trainer(**trainer_kwargs)
+    trainer = trainer_egc.Trainer(**trainer_kwargs)
     trainer.train(
         log_interval=opts.log_interval,
         save_interval=opts.save_interval,

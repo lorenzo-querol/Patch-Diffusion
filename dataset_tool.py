@@ -39,7 +39,7 @@ def save_dataset(images, labels, dest):
         img_pil = PIL.Image.fromarray(img_np, "RGB")
         img_pil.save(file_path, format="png")
 
-        label_dict[archive_fname] = int(label)
+        label_dict[archive_fname] = int(label.item())
 
     # Save metadata
     metadata = {"labels": label_dict}
@@ -68,9 +68,12 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
         assert resolution in [28, 64, 128, 224], f"Unsupported resolution: {resolution} for MedMNIST datasets"
         info = INFO[dataset]
         DataClass = getattr(medmnist, info["python_class"])
-        trainset = DataClass(root="../tmp", split="train", download=True, transform=transforms.ToTensor(), size=resolution, mmap_mode="r")
-        validset = DataClass(root="../tmp", split="val", download=True, transform=transforms.ToTensor(), size=resolution, mmap_mode="r")
-        testset = DataClass(root="../tmp", split="test", download=True, transform=transforms.ToTensor(), size=resolution, mmap_mode="r")
+        resize = 256 if resolution == 224 else resolution
+
+        kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
+        trainset = DataClass(split="train", size=resolution, mmap_mode="r", **kwargs)
+        validset = DataClass(split="val", size=resolution, mmap_mode="r", **kwargs)
+        testset = DataClass(split="test", size=resolution, mmap_mode="r", **kwargs)
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
 
