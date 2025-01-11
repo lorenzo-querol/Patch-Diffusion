@@ -20,12 +20,10 @@ class ActiveLearningTrainer:
         self.num_samples = int(num_samples * len(self.base_trainer.cls_dataset))
         self.strategy = strategy
 
-        self.labeled_indices = []
-        self.unlabeled_indices = list(range(len(self.base_trainer.cls_dataset)))
+        all_indices = np.array(list(range(len(self.base_trainer.cls_dataset))))
 
-        initial_indices = np.random.choice(self.unlabeled_indices, size=self.num_samples, replace=False)
-        self.labeled_indices.extend(initial_indices)
-        self.unlabeled_indices = [i for i in self.unlabeled_indices if i not in initial_indices]
+        self.labeled_indices = np.random.choice(all_indices, size=self.num_samples, replace=False)
+        self.unlabeled_indices = np.setdiff1d(all_indices, self.labeled_indices)
         self._update_dataloaders()
 
     def _update_dataloaders(self):
@@ -65,7 +63,9 @@ class ActiveLearningTrainer:
         if num_to_sample == 0:
             return []
 
-        sorted_indices = torch.argsort(probs)[:num_to_sample].cpu().numpy().tolist()
+        # Ensure sorted_indices is within bounds
+        sorted_indices = torch.argsort(probs)[: len(self.unlabeled_indices)].cpu().numpy().tolist()
+        sorted_indices = sorted_indices[:num_to_sample]  # Limit to num_to_sample
         query_indices = [self.unlabeled_indices[i] for i in sorted_indices]
 
         return query_indices

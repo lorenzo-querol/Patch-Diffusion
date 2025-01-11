@@ -8,7 +8,7 @@ from accelerate import Accelerator
 
 import dnnlib
 from training import trainer_wrn
-from training.trainer_active import ActiveLearningTrainer, WRNActiveLearningTrainer
+from training.trainer_active import WRNActiveLearningTrainer
 
 warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.
 

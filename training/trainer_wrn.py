@@ -14,25 +14,10 @@ from torchvision import transforms
 from tqdm import tqdm
 
 import dnnlib
-from training.ece import ECELoss
+from .ece import ECELoss
+from .utils import Meter
 
-
-class Meter:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.total = 0.0
-        self.count = 0
-
-    def update(self, value, count=1):
-        self.total += value * count
-        self.count += count
-
-    def compute(self):
-        if self.count == 0:
-            return 0.0
-        return self.total / self.count
+accelerator = Accelerator()
 
 
 class Trainer:
@@ -144,22 +129,22 @@ class Trainer:
         self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(self.cls_dataloader, self.val_dataloader, self.test_dataloader)
 
     def _set_requires_grad(self, model, requires_grad):
-        """Set requires_grad for all parameters in the model"""
+        """Set requires_grad for all parameters in the model."""
         for param in model.parameters():
             param.requires_grad = requires_grad
 
     def _build_network(self):
-        """Setup network"""
-        self.print_fn("Constructing network...")
+        """Setup network."""
+        self.print_fn("Setting up network...")
 
-        self.network_kwargs = {**self.network_kwargs, "num_classes": self.label_dim}
+        self.network_kwargs.update({"num_classes": self.label_dim})
         self.net = dnnlib.util.construct_class_by_name(**self.network_kwargs)
 
         if self.accelerator.is_local_main_process:
             with open(os.path.join(self.run_dir, "network_kwargs.json"), "w") as f:
                 json.dump(self.network_kwargs, f, indent=4)
 
-        if self.accelerator.is_main_process:
+        if self.accelerator.is_local_main_process:
             self.ema = EMA(self.net)
             self.ema = self.ema.to(self.device)
 
@@ -218,20 +203,18 @@ class Trainer:
     def _gather(self, metrics: OrderedDict):
         """Gather the metrics across all processes."""
         global_metrics = self.accelerator.gather_for_metrics(metrics)
-        if self.accelerator.is_main_process:
+        if self.accelerator.is_local_main_process:
             global_metrics = {k: v.mean().item() for k, v in global_metrics.items()}
         return global_metrics
 
+    @accelerator.on_local_main_process
     def _update_ema(self):
-        if not self.accelerator.is_main_process:
-            return
-
         self.ema.update()
 
     def _train_one_epoch(self):
-        loss_meter = Meter()
-        acc_meter = Meter()
-        ece_meter = Meter()
+        cls_loss_meter = Meter()
+        cls_acc_meter = Meter()
+        cls_ece_meter = Meter()
 
         self.net.train()
 
@@ -244,22 +227,22 @@ class Trainer:
                 logits = self.net(x)
                 loss = torch.nn.functional.cross_entropy(logits, y)
                 acc = (logits.argmax(dim=1) == y).float().mean()
+                ece = self.ece(logits, y)
 
-                loss_meter.update(loss.mean(), x.size(0))
-                acc_meter.update(acc, x.size(0))
-                ece_meter.update(self.ece(logits, y))
-
-                self._update_ema()
+                cls_loss_meter.update(loss.mean(), x.size(0))
+                cls_acc_meter.update(acc, x.size(0))
+                cls_ece_meter.update(ece, x.size(0))
 
                 self.accelerator.backward(loss)
+
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                self._update_ema()
 
-            # Log metrics
             metrics = {
-                "cls_loss": loss_meter.compute().clone().detach(),
-                "cls_acc": acc_meter.compute().clone().detach(),
-                "cls_ece": ece_meter.compute().clone().detach(),
+                "cls_loss": cls_loss_meter.compute().clone().detach(),
+                "cls_acc": cls_acc_meter.compute().clone().detach(),
+                "cls_ece": cls_ece_meter.compute().clone().detach(),
                 "lr": torch.tensor(self.optimizer.param_groups[0]["lr"], device=self.device),
             }
             metrics = self._gather(metrics)
@@ -270,6 +253,8 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
+        """Evaluate the model on the given dataset."""
+
         dataloader = self.accelerator.prepare(dataloader)
         loss_meter = Meter()
         acc_meter = Meter()
@@ -286,13 +271,12 @@ class Trainer:
                 logits = net(x)
                 loss = torch.nn.functional.cross_entropy(logits, y)
                 acc = (logits.argmax(dim=1) == y).float().mean()
+                ece = self.ece(logits, y)
 
-                # Update global meters
                 loss_meter.update(loss.mean(), x.size(0))
                 acc_meter.update(acc, x.size(0))
-                ece_meter.update(self.ece(logits, y))
+                ece_meter.update(ece, x.size(0))
 
-            # Log metrics
             metrics = {
                 "val_cls_loss": loss_meter.compute().clone().detach(),
                 "val_cls_acc": acc_meter.compute().clone().detach(),
@@ -308,24 +292,25 @@ class Trainer:
 
     @torch.no_grad()
     def get_probs(self, net: torch.nn.Module, dataloader: DataLoader):
+        """Get the least confidence scores and predictions."""
         dataloader = self.accelerator.prepare(dataloader)
-        probs = []
+        lc_scores = []
 
         net.eval()
-
-        with tqdm(total=len(dataloader), desc="Getting Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
+        with tqdm(total=len(dataloader), desc="Computing LC Scores", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for x, _ in dataloader:
                 pbar.update(1)
                 logits = net(x)
-                probs.append(logits.softmax(dim=1))
+                probs = logits.softmax(dim=1)
+
+                max_confidence = torch.max(probs, dim=1)[0]
+                lc_scores.append(1 - max_confidence)
+
             pbar.close()
 
         net.train()
 
-        probs = torch.cat(probs, dim=0)
-        probs = torch.max(probs, dim=1).values
-
-        return probs
+        return torch.cat(lc_scores, dim=0)
 
     def _compute_norms(self):
         """Compute the gradient and parameter norms."""
@@ -342,35 +327,33 @@ class Trainer:
 
         return grad_norm, param_norm
 
+    @accelerator.on_local_main_process
     def _save(self, filename: str):
-        if not self.accelerator.is_main_process:
-            return
+        """Save the model and optimizer state."""
 
         data = {
             "epoch": self.cur_epoch,
             "net": self.accelerator.unwrap_model(self.net).state_dict(),
-            "ema": self.ema.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "ema": self.ema.state_dict(),
         }
 
         torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
 
     def _load(self):
-        """Either load the latest checkpoint from the directory or load the checkpoint from the file
-
-        :params resume_from: The directory or the file to resume from. If it is a directory, the latest
-        checkpoint will be loaded. Else, the specified file will be loaded.
-        """
-        if not self.resume_from.endswith(".pt"):
-            pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
-            ckpt = os.path.join(self.resume_from, pt_files[-1])
-        else:
-            ckpt = self.resume_from
+        """Load the latest checkpoint from the directory or the specified file."""
+        ckpt = self.resume_from
+        if not ckpt.endswith(".pt"):
+            pt_files = sorted(f for f in os.listdir(ckpt) if f.endswith(".pt"))
+            ckpt = os.path.join(ckpt, pt_files[-1])
 
         self.print_fn(f"Resuming from {ckpt}...")
 
         data = torch.load(ckpt, weights_only=True)
-
         self.cur_epoch = data["epoch"]
         self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
         self.optimizer.load_state_dict(data["optimizer"])
+
+        if self.accelerator.is_local_main_process:
+            self.ema.load_state_dict(data["ema"])
+            self.ema = self.ema.to(self.device)

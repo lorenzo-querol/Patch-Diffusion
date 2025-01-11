@@ -40,9 +40,10 @@ def parse_int_list(s):
 @click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
 @click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
 @click.option("--val_dir", help="Path to the valid dataset", metavar="ZIP|DIR", type=str, required=True)
+@click.option("--test_dir", help="Path to the test dataset", metavar="ZIP|DIR", type=str, required=True)
 @click.option("--batch_size", help="Total batch size", metavar="INT", type=click.IntRange(min=1), default=128, show_default=True)
 @click.option("--cond", help="Train class-conditional model", metavar="BOOL", type=bool, default=False, show_default=True)
-@click.option("--num_steps", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=100000, show_default=True)
+@click.option("--num_epochs", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=200, show_default=True)
 @click.option("--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--resume_from", help="Resume from a previous checkpoint", metavar="DIR", type=str, default=None)
 
@@ -61,14 +62,7 @@ def parse_int_list(s):
 
 # Classification-related.
 @click.option("--ce_weight", help="Cross-entropy loss weight", metavar="FLOAT", type=click.FloatRange(min=0), default=1.0, show_default=True)
-@click.option(
-    "--eval_interval",
-    help="How often to evaluate the model on the test dataset",
-    metavar="TICKS",
-    type=click.IntRange(min=1),
-    default=100,
-    show_default=True,
-)
+@click.option("--eval_interval", help="How often to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=1), default=100, show_default=True)
 
 # I/O-related.
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
@@ -91,6 +85,12 @@ def main(**kwargs):
         use_labels=opts.cond,
         path=opts.val_dir,
     )
+    trainer_kwargs.test_dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.test_dir,
+    )
+
     trainer_kwargs.network_kwargs = dnnlib.EasyDict(
         class_name="training.networks.EBMUNet",
         model_channels=opts.model_channels,
@@ -120,7 +120,7 @@ def main(**kwargs):
     )
     trainer_kwargs.target = opts.target
     trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
-    trainer_kwargs.num_steps = opts.num_steps
+    trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.accum_steps = opts.accum_steps
     trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.ce_weight = opts.ce_weight
@@ -146,12 +146,13 @@ def main(**kwargs):
     print_fn(f"Output directory:        {trainer_kwargs.run_dir}")
     print_fn(f"Dataset path:            {trainer_kwargs.dataset_kwargs.path}")
     print_fn(f"Validation path:         {trainer_kwargs.val_dataset_kwargs.path}")
+    print_fn(f"Test path:               {trainer_kwargs.test_dataset_kwargs.path}")
     print_fn(f"Batch size:              {trainer_kwargs.batch_size}")
     print_fn(f"Diffusion schedule:      {trainer_kwargs.diffusion_kwargs.schedule_name}")
     print_fn(f"Timesteps:               {trainer_kwargs.diffusion_kwargs.timesteps}")
     print_fn(f"Target:                  {trainer_kwargs.target}")
-    print_fn(f"Number of training steps: {trainer_kwargs.num_steps}")
-    print_fn(f"Resume from:              {trainer_kwargs.resume_from}")
+    print_fn(f"Epochs:                  {trainer_kwargs.num_epochs}")
+    print_fn(f"Resume from:             {trainer_kwargs.resume_from}")
     print_fn(f"Random seed:             {trainer_kwargs.seed}")
     print_fn(f"Accumulation steps:      {trainer_kwargs.accum_steps}")
     print_fn(f"Number of GPUs:          {accelerator.num_processes}")

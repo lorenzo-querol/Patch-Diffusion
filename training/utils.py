@@ -11,3 +11,21 @@ def cycle(dataloader):
 
 def exists(val):
     return val is not None
+
+
+class Meter:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.total = 0.0
+        self.count = 0
+
+    def update(self, value, count=1):
+        self.total += value * count
+        self.count += count
+
+    def compute(self):
+        if self.count == 0:
+            return 0.0
+        return self.total / self.count

@@ -17,7 +17,7 @@ def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
     tester_kwargs = dnnlib.EasyDict()
 
-    tester_kwargs.test_dataset_kwargs = dnnlib.EasyDictd(
+    tester_kwargs.test_dataset_kwargs = dnnlib.EasyDict(
         class_name="training.dataset.ImageFolderDataset",
         use_labels=opts.cond,
         path=opts.test_dir,

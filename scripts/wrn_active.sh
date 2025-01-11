@@ -1,16 +1,17 @@
 #!/bin/bash
 
 seeds=(1 2 3 4 5)
+dataset_dir="./data/bloodmnist_28"
 
 for seed in "${seeds[@]}"; do
     accelerate launch train_wrn.py \
-        --outdir=wrn-runs\
-        --train_dir=./data/cifar10/train \
-        --val_dir=./data/cifar10/val \
-        --test_dir=./data/cifar10/test \
+        --outdir=wrn-runs \
+        --train_dir=${dataset_dir}/train \
+        --val_dir=${dataset_dir}/val \
+        --test_dir=${dataset_dir}/test \
         --batch_size=128 \
         --cond=1 \
-        --num_epochs=50 \
+        --num_epochs=1 \
         --accum_steps=1 \
         --decay_epochs=60,120,160 \
         --decay_rate=0.2 \
@@ -29,9 +30,9 @@ done
 for seed in "${seeds[@]}"; do
     accelerate launch train_wrn.py \
         --outdir=wrn-runs \
-        --train_dir=./data/cifar10/train \
-        --val_dir=./data/cifar10/val \
-        --test_dir=./data/cifar10/test \
+        --train_dir=${dataset_dir}/train \
+        --val_dir=${dataset_dir}/val \
+        --test_dir=${dataset_dir}/test \
         --batch_size=128 \
         --cond=1 \
         --num_epochs=50 \
