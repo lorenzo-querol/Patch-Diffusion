@@ -1,16 +1,42 @@
 import torch
 
 
-def get_patches(images, patch_size, padding=None):
-    """Extract random patches of square `patch_size`
+def get_batch_data(dataset_iterator, batch_mul: int = 1):
+    """
+    Get a batch of data from the dataset iterator.
+
+    Args:
+        dataset_iterator: The dataset wrapped with a `cycle` or similar iterator function.
+        batch_mul (int, optional): The number of batches to get from `dataset_iterator`. Default is `1`.
+
+    Returns:
+        A `tuple` of images and labels.
+    """
+
+    images, labels = [], []
+
+    for _ in range(batch_mul):
+        data = next(dataset_iterator)
+        images.append(data[0])
+        labels.append(data[1])
+
+    return torch.cat(images), torch.cat(labels)
+
+
+def get_patches(images: torch.Tensor, patch_size: int, padding: int = None):
+    """
+    Extract random patches of square `patch_size`
     from the input images and return them along with their positions.
 
     Proposed in https://openreview.net/forum?id=iv2sTQtbst.
 
-    :param images: Input images of shape (batch_size, channels, resolution, resolution)
-    :param patch_size: Size of the patches to be extracted
-    :param padding: Padding to be added to the images before extracting patches
-    :return: Patches with positions of shape (batch_size, channels + 2, patch_size, patch_size)
+    Args:
+        images (torch.Tensor): Input images of shape (batch_size, channels, resolution, resolution).
+        patch_size (int): Size of the patches to be extracted.
+        padding (int, optional, defaults to `None`): Padding to be added to the images before extracting patches.
+
+    Returns:
+        Patches with positions of shape (batch_size, channels + 2, patch_size, patch_size)
     """
     device = images.device
     batch_size, resolution = images.size(0), images.size(2)

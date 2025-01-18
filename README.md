@@ -1,6 +1,6 @@
 ## Getting started
 
-### Preparing datasets
+### Preparing Datasets
 
 For CIFAR10/100 dataset, you can use the following commands. 
 
@@ -19,61 +19,21 @@ python dataset_tool.py --dataset bloodmnist \
                        --resolution 28
 ```
 
-### Train Patch EGC
+### Training
 
-You can train new models using `train.py`. For example with CIFAR10:
+You can train models using the following scripts found in the `scripts` folder. For example:
 
 ```shell
-accelerate launch train.py \
-        --outdir=training-runs \
-        --train_dir=./data/cifar10/train \
-        --val_dir=./data/cifar10/test \
-        --batch_size=128 \
-        --cond=1 \
-        --model_channels=128 \
-        --num_res_blocks=2 \
-        --channel_mult=1,2,2,2 \
-        --attn_resolutions=16,8 \
-        --dropout_rate=0.1 \
-        --schedule_name=cosine \
-        --timesteps=1000 \
-        --lr=2e-4 \
-        --ce_weight=0.0 \
-        --label_smooth=0.2 \
-        --eval_interval=10 \
-        --resume_from=training-runs/00004-run
+# Train baseline models
+bash scripts/egc_baseline.sh
+bash scripts/wrn_baseline.sh
+
+# Train active learning models
+bash scripts/egc_active.sh
+bash scripts/wrn_active.sh
 ```
 
-You can train new baseline models using `train_wrn.py`. For example:
-
-```.bash
-CUDA_VISIBLE_DEVICES=1 python train_wrn.py \
-    --dataset=cifar10 \
-    --outdir=wrn-runs \
-    --train_dir=../data/cifar10/train \
-    --val_dir=../data/cifar10/test \
-    --batch=128 \
-    --norm=batch \
-    --eval_every=10 \
-    --seed=1
-```
-To test the performance of the WRN model, you can use the following command:
-
-```.bash
-CUDA_VISIBLE_DEVICES=1 python train_wrn.py \
-    --dataset=cifar10 \
-    --outdir=wrn-test-runs \
-    --train_dir=../data/cifar10/train \
-    --val_dir=../data/cifar10/valid \
-    --batch=128 \
-    --norm=batch \
-    --seed=1 \
-    --test \
-    --test_dir=../data/cifar10/test \
-    --network_path=wrn-runs/00027-wrn_run/network-final.pt
-```
-
-We follow the hyperparameter settings of EDM, and introduce two new parameters here:
+<!-- We follow the hyperparameter settings of EDM, and introduce two new parameters here:
 
 - `--real_p`: the ratio of full size image used in the training.
 - `--train_on_latents`: where to train on the Latent Diffusion latent space, instead of the pixel space. Note we trained our models on the latent space for 256x256 images. 
@@ -121,7 +81,7 @@ To compute Fr&eacute;chet inception distance (FID) for a given model and sampler
 # Generate 50000 images and save them as fid-tmp/*/*.png
 <!-- torchrun --standalone --nproc_per_node=1 generate.py --outdir=fid-tmp --seeds=0-49999 --subdirs \
     --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl -->
-
+<!-- 
 torchrun --standalone --nproc_per_node=1 generate.py --outdir=fid-tmp --seeds=0-49999 --subdirs \
     --network=training-runs/00000-train-cond-ebm-pedm-gpus2-batch128-fp32/network-snapshot-007536.pkl --cfg=1.0
 
@@ -133,4 +93,4 @@ torchrun --standalone --nproc_per_node=1 fid.py calc --images=fid-tmp \
 
 Both of the above commands can be parallelized across multiple GPUs by adjusting `--nproc_per_node`. The second command typically takes 1-3 minutes in practice, but the first one can sometimes take several hours, depending on the configuration. See [`python fid.py --help`](./docs/fid-help.txt) for the full list of options.
 
-
+ --> 

@@ -1,36 +1,16 @@
 #!/bin/bash
 
-python test_wrn.py \
-    --outdir=for_keep/wrn_lc_v2/00000-run \
-    --test_dir=./data/cifar10/test \
-    --batch_size=128 \
-    --cond=1 \
-    --seed=1
+seeds=(0 1 2 3 4)
+strategies=(random lc entropy sm)
+dataset_dir="./data/bloodmnist_28"
 
-python test_wrn.py \
-    --outdir=for_keep/wrn_lc_v2/00001-run \
-    --test_dir=./data/cifar10/test \
-    --batch_size=128 \
-    --cond=1 \
-    --seed=1
-
-python test_wrn.py \
-    --outdir=for_keep/wrn_lc_v2/00002-run \
-    --test_dir=./data/cifar10/test \
-    --batch_size=128 \
-    --cond=1 \
-    --seed=1
-
-python test_wrn.py \
-    --outdir=for_keep/wrn_lc_v2/00003-run \
-    --test_dir=./data/cifar10/test \
-    --batch_size=128 \
-    --cond=1 \
-    --seed=1
-
-python test_wrn.py \
-    --outdir=for_keep/wrn_lc_v2/00004-run \
-    --test_dir=./data/cifar10/test \
-    --batch_size=128 \
-    --cond=1 \
-    --seed=1
+for seed in "${seeds[@]}"; do
+    for strategy in "${strategies[@]}"; do
+        python test_wrn.py \
+            --outdir=./wrn-runs/${strategy}/0000${seed}-run \
+            --test_dir=./data/bloodmnist_28/test \
+            --batch_size=256 \
+            --cond=1 \
+            --seed=1
+    done
+done

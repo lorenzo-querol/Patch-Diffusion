@@ -1,19 +1,19 @@
 import json
-import math
 import os
 from typing import OrderedDict
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DataLoaderConfiguration, set_seed
+from diffusers import AutoencoderKL
 from ema_pytorch import EMA
 from torch.utils.data import DataLoader
 from torch_uncertainty.post_processing import TemperatureScaler
-from torchinfo import summary
 from torchvision import transforms
 from tqdm import tqdm
 
 import dnnlib
+
 from .ece import ECELoss
 from .utils import Meter
 
@@ -21,37 +21,60 @@ accelerator = Accelerator()
 
 
 class Trainer:
+    """Trainer for Wide Residual Network."""
+
     def __init__(
         self,
-        run_dir="./training-runs",  # Output directory
-        dataset_kwargs={},  # Training dataset options
-        val_dataset_kwargs={},  # Validation dataset options
-        test_dataset_kwargs={},  # Test dataset options
-        network_kwargs={},  # Model options
-        optimizer_kwargs={},  # Optimizer options
-        decay_epochs=[60, 120, 160],  # Learning rate milestones
-        decay_rate=0.2,  # Learning rate decay rate
-        num_epochs=200,  # Number of training steps
-        accum_steps=1,  # Accumulate gradients over multiple steps
-        batch_size=128,  # Batch size
-        seed=1,  # Seed for reproducibility
-        resume_from=None,  # Checkpoint to resume from
-        calibrate=False,  # Calibrate the model
+        run_dir: str,
+        dataset_kwargs,
+        val_dataset_kwargs,
+        test_dataset_kwargs,
+        network_kwargs,
+        optimizer_kwargs,
+        decay_epochs: list[int] = [60, 120, 160],
+        decay_rate: float = 0.2,
+        num_epochs: int = 200,
+        accum_steps: int = 1,
+        batch_size: int = 128,
+        seed: int = 1,
+        resume_from: str = None,
+        calibrate: bool = False,
+        train_on_latents: bool = False,
     ):
+        """
+        Args:
+            run_dir (`str`): Output directory.
+            dataset_kwargs (`dict`): Training dataset options.
+            val_dataset_kwargs (`dict`): Validation dataset options.
+            test_dataset_kwargs (`dict`): Test dataset options.
+            network_kwargs (`dict`): Model options.
+            optimizer_kwargs (`dict`): Optimizer options.
+            decay_epochs (`list`): Learning rate milestones.
+            decay_rate (`float`): Learning rate decay rate.
+            num_epochs (`int`): Number of training epochs.
+            accum_steps (`int`): Accumulate gradients over multiple steps.
+            batch_size (`int`): Batch size.
+            seed (`int`): Seed for reproducibility.
+            resume_from (`str`): Checkpoint to resume from.
+            calibrate (`bool`): Calibrate the model.
+            train_on_latents (`bool`): Train on latent representations.
+        """
         self.run_dir = run_dir
         self.dataset_kwargs = dataset_kwargs
         self.val_dataset_kwargs = val_dataset_kwargs
         self.test_dataset_kwargs = test_dataset_kwargs
         self.network_kwargs = network_kwargs
         self.optimizer_kwargs = optimizer_kwargs
+
         self.decay_epochs = decay_epochs
         self.decay_rate = decay_rate
         self.num_epochs = num_epochs
         self.accum_steps = accum_steps
+        self.batch_size = batch_size
         self.seed = seed
         self.resume_from = resume_from
-        self.batch_size = batch_size
         self.calibrate = calibrate
+        self.train_on_latents = train_on_latents
 
         self.ece = ECELoss(n_bins=10)
 
@@ -61,7 +84,19 @@ class Trainer:
         )
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
+
         self.per_device_batch_size = self._calculate_per_device_batch_size()
+        self.dataloader_kwargs = dict(
+            batch_size=self.per_device_batch_size,
+            drop_last=True,
+            pin_memory=True,
+            num_workers=4,
+            generator=torch.Generator().manual_seed(self.seed),
+        )
+
+        self.img_vae = None
+        self.latent_scale_factor = 0.18215
+
         self._init_trainer()
 
     def _calculate_per_device_batch_size(self):
@@ -72,7 +107,6 @@ class Trainer:
         return per_device_batch_size
 
     def _init_trainer(self):
-        """Initialize the Trainer: seeds, datasets, and network."""
         self._init_env()
         self._prepare_dataloaders()
         self._build_network()
@@ -81,6 +115,7 @@ class Trainer:
             self._load()
 
     def _init_env(self):
+        """Sets seeds and other environment variables."""
         set_seed(self.seed)
         torch.backends.cudnn.benchmark = True
 
@@ -115,21 +150,21 @@ class Trainer:
         self.cls_dataset = dnnlib.util.construct_class_by_name(**self.dataset_kwargs, transform=augment_transform)
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         self.test_dataset = dnnlib.util.construct_class_by_name(**self.test_dataset_kwargs, transform=transform)
-        self.dataloader_kwargs = dict(
-            batch_size=self.per_device_batch_size,
-            drop_last=True,
-            pin_memory=True,
-            num_workers=4,
-            generator=torch.Generator().manual_seed(self.seed),
-        )
+
         self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
         self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
         self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
         self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(self.cls_dataloader, self.val_dataloader, self.test_dataloader)
 
-    def _set_requires_grad(self, model, requires_grad):
-        """Set requires_grad for all parameters in the model."""
+    def _set_requires_grad(self, model: torch.nn.Module, requires_grad: bool):
+        """
+        Set requires_grad for all parameters in the model.
+
+        Args:
+            model (torch.nn.Module): The model to set `requires_grad` for.
+            requires_grad (bool): Whether to set `requires_grad` to true or false.
+        """
         for param in model.parameters():
             param.requires_grad = requires_grad
 
@@ -137,54 +172,58 @@ class Trainer:
         """Setup network."""
         self.print_fn("Setting up network...")
 
-        self.network_kwargs.update({"num_classes": self.label_dim})
+        if self.train_on_latents:
+            self.img_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(self.device)
+            self.img_vae.eval()
+            self._set_requires_grad(self.img_vae, False)
+            self.img_resolution, self.img_channels = self.img_resolution // 8, 4
+
+        self.network_kwargs.update({"label_dim": self.label_dim, "in_channels": self.img_channels})
         self.net = dnnlib.util.construct_class_by_name(**self.network_kwargs)
 
-        if self.accelerator.is_local_main_process:
+        if self.accelerator.is_main_process:
             with open(os.path.join(self.run_dir, "network_kwargs.json"), "w") as f:
                 json.dump(self.network_kwargs, f, indent=4)
 
-        if self.accelerator.is_local_main_process:
-            self.ema = EMA(self.net)
-            self.ema = self.ema.to(self.device)
+        # Setup the EMA
+        if self.accelerator.is_main_process:
+            self.ema = EMA(self.net, beta=0.9999, update_every=1, power=3 / 4)
 
-        # ---------------------------------------------------------------------
-        """ Setup the optimizer """
+        # Setup the optimizer
         self.print_fn("Setting up optimizer...")
         self.optimizer = dnnlib.util.construct_class_by_name(params=self.net.parameters(), **self.optimizer_kwargs)
 
-        # ---------------------------------------------------------------------
-        """ Prepare for distributed training """
+        # Prepare for distributed training
         self.net, self.optimizer = self.accelerator.prepare(self.net, self.optimizer)
 
-        summary(
-            self.net,
-            input_size=(self.per_device_batch_size, self.img_channels, self.img_resolution, self.img_resolution),
-            col_names=("input_size", "output_size", "num_params", "trainable"),
-            device="cuda",
-        )
+    def _encode_latents(self, images: torch.Tensor):
+        """
+        Encode the given images to compressed latent space.
 
-    def _update_lr(self):
-        lr_min = 1e-6
-        lr_max = self.optimizer.param_groups[0]["lr"]
-        lr = lr_min + (lr_max - lr_min) * (1 + math.cos(math.pi * (self.cur_epoch / self.num_epochs))) / 2
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
+        Args:
+            images (`torch.Tensor`): The images to encode.
+
+        Returns:
+            The encoded latents.
+        """
+        with torch.no_grad():
+            images = self.img_vae.encode(images)["latent_dist"].sample()
+            latents = self.latent_scale_factor * images
+
+        return latents
 
     def train(self, eval_interval: int):
-        """Main training loop.
-
-        :param log_interval: When to log the metrics.
-        :param eval_interval: When to evaluate the model.
-        :param save_interval: When to save the model.
         """
+        Main training loop.
 
+        Args:
+            eval_interval (`int`): When to evaluate the model.
+        """
         self.accelerator.init_trackers(project_name="EGC")
 
         for epoch in range(self.num_epochs):
             self.cur_epoch = epoch
             self._train_one_epoch()
-            self._update_lr()
 
             if eval_interval > 0 and self.cur_epoch % eval_interval == 0:
                 model = self.net
@@ -207,11 +246,14 @@ class Trainer:
             global_metrics = {k: v.mean().item() for k, v in global_metrics.items()}
         return global_metrics
 
-    @accelerator.on_local_main_process
+    @accelerator.on_main_process
     def _update_ema(self):
+        """Update the EMA model."""
+        self.ema.to(self.device)
         self.ema.update()
 
     def _train_one_epoch(self):
+        """Train the model for one epoch."""
         cls_loss_meter = Meter()
         cls_acc_meter = Meter()
         cls_ece_meter = Meter()
@@ -219,19 +261,22 @@ class Trainer:
         self.net.train()
 
         with tqdm(total=len(self.cls_dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
-            for x, y in self.cls_dataloader:
+            for images, labels in self.cls_dataloader:
                 pbar.update(1)
 
-                y = y.argmax(dim=1)
+                labels = labels.argmax(dim=1)
 
-                logits = self.net(x)
-                loss = torch.nn.functional.cross_entropy(logits, y)
-                acc = (logits.argmax(dim=1) == y).float().mean()
-                ece = self.ece(logits, y)
+                if self.train_on_latents:
+                    images = self._encode_latents(images)
 
-                cls_loss_meter.update(loss.mean(), x.size(0))
-                cls_acc_meter.update(acc, x.size(0))
-                cls_ece_meter.update(ece, x.size(0))
+                logits = self.net(images)
+                loss = torch.nn.functional.cross_entropy(logits, labels)
+                acc = (logits.argmax(dim=1) == labels).float().mean()
+                ece = self.ece(logits, labels)
+
+                cls_loss_meter.update(loss.mean(), images.size(0))
+                cls_acc_meter.update(acc, images.size(0))
+                cls_ece_meter.update(ece, images.size(0))
 
                 self.accelerator.backward(loss)
 
@@ -253,8 +298,16 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
-        """Evaluate the model on the given dataset."""
+        """
+        Evaluate the model on the given dataloader.
 
+        Args:
+            net (`torch.nn.Module`): The model to evaluate.
+            dataloader (`DataLoader`): A validation dataloader.
+
+        Returns:
+            The computed metrics.
+        """
         dataloader = self.accelerator.prepare(dataloader)
         loss_meter = Meter()
         acc_meter = Meter()
@@ -263,19 +316,22 @@ class Trainer:
         net.eval()
 
         with tqdm(total=len(dataloader), desc="Validation", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
-            for x, y in dataloader:
+            for images, labels in dataloader:
                 pbar.update(1)
 
-                y = y.argmax(dim=1)
+                labels = labels.argmax(dim=1)
 
-                logits = net(x)
-                loss = torch.nn.functional.cross_entropy(logits, y)
-                acc = (logits.argmax(dim=1) == y).float().mean()
-                ece = self.ece(logits, y)
+                if self.train_on_latents:
+                    images = self._encode_latents(images)
 
-                loss_meter.update(loss.mean(), x.size(0))
-                acc_meter.update(acc, x.size(0))
-                ece_meter.update(ece, x.size(0))
+                logits = net(images)
+                loss = torch.nn.functional.cross_entropy(logits, labels)
+                acc = (logits.argmax(dim=1) == labels).float().mean()
+                ece = self.ece(logits, labels)
+
+                loss_meter.update(loss.mean(), images.size(0))
+                acc_meter.update(acc, images.size(0))
+                ece_meter.update(ece, images.size(0))
 
             metrics = {
                 "val_cls_loss": loss_meter.compute().clone().detach(),
@@ -286,31 +342,41 @@ class Trainer:
             pbar.set_postfix(metrics)
             pbar.close()
 
-        net.train()
-
         self.accelerator.log(metrics, step=self.cur_epoch)
 
     @torch.no_grad()
     def get_probs(self, net: torch.nn.Module, dataloader: DataLoader):
-        """Get the least confidence scores and predictions."""
+        """
+        Get the computed probabilities.
+
+        Args:
+            net (`torch.nn.Module`): The model to use for computing probabilities.
+            dataloader (`DataLoader`): The dataloader to use for computing probabilities.
+
+        Returns:
+            The computed probabilities.
+        """
         dataloader = self.accelerator.prepare(dataloader)
-        lc_scores = []
+        probs = []
 
         net.eval()
-        with tqdm(total=len(dataloader), desc="Computing LC Scores", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
-            for x, _ in dataloader:
-                pbar.update(1)
-                logits = net(x)
-                probs = logits.softmax(dim=1)
 
-                max_confidence = torch.max(probs, dim=1)[0]
-                lc_scores.append(1 - max_confidence)
+        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
+            for images, _ in dataloader:
+                pbar.update(1)
+
+                if self.train_on_latents:
+                    images = self._encode_latents(images)
+
+                logits = net(images)
+                prob = logits.softmax(dim=1)
+                probs.append(prob)
 
             pbar.close()
 
         net.train()
 
-        return torch.cat(lc_scores, dim=0)
+        return torch.cat(probs, dim=0)
 
     def _compute_norms(self):
         """Compute the gradient and parameter norms."""
@@ -327,33 +393,46 @@ class Trainer:
 
         return grad_norm, param_norm
 
-    @accelerator.on_local_main_process
+    @accelerator.on_main_process
     def _save(self, filename: str):
-        """Save the model and optimizer state."""
+        """
+        Save a checkpoint file.
 
+        Args:
+            filename (`str`): The name of the file to save.
+        """
         data = {
             "epoch": self.cur_epoch,
             "net": self.accelerator.unwrap_model(self.net).state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "ema": self.ema.state_dict(),
         }
-
+        self.print_fn(f"Saving checkpoint to {filename}...")
         torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
 
     def _load(self):
-        """Load the latest checkpoint from the directory or the specified file."""
+        """
+        Load the latest checkpoint specified by `self.resume_from`.\n
+
+        If `self.resume_from` is a directory, then the latest checkpoint is loaded from that directory.\n
+        If `self.resume_from` is a file, then the checkpoint is loaded from that file.\n
+        If `self.resume_from` is `None`, then no checkpoint is loaded.
+        """
+        if self.resume_from is None:
+            return
+
         ckpt = self.resume_from
-        if not ckpt.endswith(".pt"):
-            pt_files = sorted(f for f in os.listdir(ckpt) if f.endswith(".pt"))
-            ckpt = os.path.join(ckpt, pt_files[-1])
+        if self.resume_from.endswith(".pt"):
+            pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
+            ckpt = os.path.join(self.resume_from, pt_files[-1])
 
         self.print_fn(f"Resuming from {ckpt}...")
-
         data = torch.load(ckpt, weights_only=True)
+
         self.cur_epoch = data["epoch"]
         self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
         self.optimizer.load_state_dict(data["optimizer"])
 
-        if self.accelerator.is_local_main_process:
+        if self.accelerator.is_main_process:
             self.ema.load_state_dict(data["ema"])
-            self.ema = self.ema.to(self.device)
+            self.ema.to(self.device)

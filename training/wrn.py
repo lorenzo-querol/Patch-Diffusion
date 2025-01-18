@@ -31,7 +31,7 @@ class BasicBlock(nn.Module):
 
 
 class WideResNet(nn.Module):
-    def __init__(self, depth, width_factor, dropout_rate=0.0, num_classes=10, use_bn=True):
+    def __init__(self, depth, width_factor, in_channels, dropout_rate=0.0, label_dim=10, use_bn=True):
         super().__init__()
         self.depth = depth
         self.width_factor = width_factor
@@ -42,7 +42,7 @@ class WideResNet(nn.Module):
         assert (depth - 4) % 6 == 0, "Wide-ResNet depth should be 6n+4"
         n = (depth - 4) // 6
 
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(in_channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
 
         self.block1 = self._make_layer(n, self.n_channels[0], self.n_channels[1], 1, norm_layer)
         self.block2 = self._make_layer(n, self.n_channels[1], self.n_channels[2], 2, norm_layer)
@@ -51,7 +51,7 @@ class WideResNet(nn.Module):
         self.bn1 = norm_layer(self.n_channels[3], momentum=0.9)
         self.relu = nn.ReLU(inplace=True)
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(self.n_channels[3], num_classes)
+        self.fc = nn.Linear(self.n_channels[3], label_dim)
 
         self._init_weights()
 
