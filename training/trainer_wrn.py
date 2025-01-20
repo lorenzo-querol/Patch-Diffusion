@@ -21,8 +21,6 @@ accelerator = Accelerator()
 
 
 class Trainer:
-    """Trainer for Wide Residual Network."""
-
     def __init__(
         self,
         run_dir: str,
@@ -31,17 +29,14 @@ class Trainer:
         test_dataset_kwargs,
         network_kwargs,
         optimizer_kwargs,
-        decay_epochs: list[int] = [60, 120, 160],
-        decay_rate: float = 0.2,
-        num_epochs: int = 200,
-        accum_steps: int = 1,
         batch_size: int = 128,
+        accum_steps: int = 1,
         seed: int = 1,
         resume_from: str = None,
-        calibrate: bool = False,
         train_on_latents: bool = False,
     ):
-        """
+        """Common initialization parameters shared by all trainers.
+
         Args:
             run_dir (`str`): Output directory.
             dataset_kwargs (`dict`): Training dataset options.
@@ -49,15 +44,11 @@ class Trainer:
             test_dataset_kwargs (`dict`): Test dataset options.
             network_kwargs (`dict`): Model options.
             optimizer_kwargs (`dict`): Optimizer options.
-            decay_epochs (`list`): Learning rate milestones.
-            decay_rate (`float`): Learning rate decay rate.
-            num_epochs (`int`): Number of training epochs.
-            accum_steps (`int`): Accumulate gradients over multiple steps.
             batch_size (`int`): Batch size.
-            seed (`int`): Seed for reproducibility.
-            resume_from (`str`): Checkpoint to resume from.
-            calibrate (`bool`): Calibrate the model.
-            train_on_latents (`bool`): Train on latent representations.
+            accum_steps (`int`): Gradient accumulation steps.
+            seed (`int`): Random seed.
+            resume_from (`str`): Path to resume checkpoint from.
+            train_on_latents (`bool`): Whether to train on VAE latents.
         """
         self.run_dir = run_dir
         self.dataset_kwargs = dataset_kwargs
@@ -66,14 +57,10 @@ class Trainer:
         self.network_kwargs = network_kwargs
         self.optimizer_kwargs = optimizer_kwargs
 
-        self.decay_epochs = decay_epochs
-        self.decay_rate = decay_rate
-        self.num_epochs = num_epochs
-        self.accum_steps = accum_steps
         self.batch_size = batch_size
+        self.accum_steps = accum_steps
         self.seed = seed
         self.resume_from = resume_from
-        self.calibrate = calibrate
         self.train_on_latents = train_on_latents
 
         self.ece = ECELoss(n_bins=10)
@@ -97,7 +84,10 @@ class Trainer:
         self.img_vae = None
         self.latent_scale_factor = 0.18215
 
-        self._init_trainer()
+    def _init_env(self):
+        """Sets seeds and other environment variables."""
+        set_seed(self.seed)
+        torch.backends.cudnn.benchmark = True
 
     def _calculate_per_device_batch_size(self):
         """Calculate the batch size per device."""
@@ -106,21 +96,8 @@ class Trainer:
         assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
-    def _init_trainer(self):
-        self._init_env()
-        self._prepare_dataloaders()
-        self._build_network()
-
-        if self.resume_from is not None:
-            self._load()
-
-    def _init_env(self):
-        """Sets seeds and other environment variables."""
-        set_seed(self.seed)
-        torch.backends.cudnn.benchmark = True
-
-    def _prepare_dataloaders(self):
-        """Prepare datasets and dataloaders."""
+    def _prepare_datasets(self):
+        """Prepare datasets."""
         self.print_fn("Loading datasets...")
 
         dataset_obj = dnnlib.util.construct_class_by_name(**self.dataset_kwargs)
@@ -151,15 +128,23 @@ class Trainer:
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         self.test_dataset = dnnlib.util.construct_class_by_name(**self.test_dataset_kwargs, transform=transform)
 
-        self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
-        self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+    def _encode_latents(self, images: torch.Tensor):
+        """Encode the given images to compressed latent space.
 
-        self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(self.cls_dataloader, self.val_dataloader, self.test_dataloader)
+        Args:
+            images (`torch.Tensor`): The images to encode.
+
+        Returns:
+            The encoded latents.
+        """
+        with torch.no_grad():
+            images = self.img_vae.encode(images)["latent_dist"].sample()
+            latents = self.latent_scale_factor * images
+
+        return latents
 
     def _set_requires_grad(self, model: torch.nn.Module, requires_grad: bool):
-        """
-        Set requires_grad for all parameters in the model.
+        """Set requires_grad for all parameters in the model.
 
         Args:
             model (torch.nn.Module): The model to set `requires_grad` for.
@@ -167,6 +152,127 @@ class Trainer:
         """
         for param in model.parameters():
             param.requires_grad = requires_grad
+
+    @accelerator.on_main_process
+    def _update_ema(self):
+        """Update the EMA model."""
+        self.ema.to(self.device)
+        self.ema.update()
+
+    @accelerator.on_main_process
+    def _save_checkpoint(self, filename: str):
+        """Save a checkpoint file.
+
+        Args:
+            filename (`str`): The name of the file to save.
+        """
+        data = {"ema": self.ema.state_dict()}
+        self.print_fn(f"Saving checkpoint to {filename}...")
+        torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
+
+    def _load_checkpoint(self):
+        """Load the latest checkpoint specified by `self.resume_from`.\n
+
+        If `self.resume_from` is a directory, then the latest checkpoint is loaded from that directory.\n
+        If `self.resume_from` is a file, then the checkpoint is loaded from that file.\n
+        If `self.resume_from` is `None`, then no checkpoint is loaded.
+        """
+        if self.resume_from is None:
+            return
+
+        ckpt = self.resume_from
+        if self.resume_from.endswith(".pt"):
+            pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
+            ckpt = os.path.join(self.resume_from, pt_files[-1])
+
+        self.print_fn(f"Resuming from {ckpt}...")
+        data = torch.load(ckpt, weights_only=True)
+
+        if self.accelerator.is_main_process:
+            self.ema.load_state_dict(data["ema"])
+            self.ema.to(self.device)
+
+    def _compute_norms(self):
+        """Compute the gradient and parameter norms."""
+        grad_norm = 0.0
+        for p in self.net.parameters():
+            if p.grad is not None:
+                grad_norm += p.grad.norm(2) ** 2
+        grad_norm = grad_norm**0.5
+
+        param_norm = 0.0
+        for p in self.net.parameters():
+            param_norm += p.norm(2) ** 2
+        param_norm = param_norm**0.5
+
+        return grad_norm, param_norm
+
+
+class WRNTrainer(Trainer):
+    """Trainer for Wide Residual Network."""
+
+    def __init__(
+        self,
+        run_dir: str,
+        dataset_kwargs,
+        val_dataset_kwargs,
+        test_dataset_kwargs,
+        network_kwargs,
+        optimizer_kwargs,
+        decay_epochs: list[int] = [60, 120, 160],
+        decay_rate: float = 0.2,
+        num_epochs: int = 200,
+        accum_steps: int = 1,
+        batch_size: int = 128,
+        seed: int = 1,
+        resume_from: str = None,
+        calibrate: bool = False,
+        train_on_latents: bool = False,
+    ):
+        """WRN-specific initialization.
+
+        Args:
+            decay_epochs (`list[int]`): When to decay learning rate.
+            decay_rate (`float`): Learning rate decay factor.
+            num_epochs (`int`): Total training epochs.
+            calibrate (`bool`): Whether to calibrate model temperatures.
+        """
+        super().__init__(
+            run_dir=run_dir,
+            dataset_kwargs=dataset_kwargs,
+            val_dataset_kwargs=val_dataset_kwargs,
+            test_dataset_kwargs=test_dataset_kwargs,
+            network_kwargs=network_kwargs,
+            optimizer_kwargs=optimizer_kwargs,
+            batch_size=batch_size,
+            accum_steps=accum_steps,
+            seed=seed,
+            resume_from=resume_from,
+            train_on_latents=train_on_latents,
+        )
+
+        self.decay_epochs = decay_epochs
+        self.decay_rate = decay_rate
+        self.num_epochs = num_epochs
+        self.calibrate = calibrate
+
+        self._init_trainer()
+
+    def _init_trainer(self):
+        self._init_env()
+        self._prepare_datasets()
+        self._prepare_dataloaders()
+        self._build_network()
+
+        if self.resume_from is not None:
+            self._load_checkpoint()
+
+    def _prepare_dataloaders(self):
+        """Prepare dataloaders."""
+        self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(self.cls_dataloader, self.val_dataloader, self.test_dataloader)
 
     def _build_network(self):
         """Setup network."""
@@ -187,7 +293,7 @@ class Trainer:
 
         # Setup the EMA
         if self.accelerator.is_main_process:
-            self.ema = EMA(self.net, beta=0.9999, update_every=1, power=3 / 4)
+            self.ema = EMA(self.net, power=3 / 4, include_online_model=False)
 
         # Setup the optimizer
         self.print_fn("Setting up optimizer...")
@@ -195,22 +301,6 @@ class Trainer:
 
         # Prepare for distributed training
         self.net, self.optimizer = self.accelerator.prepare(self.net, self.optimizer)
-
-    def _encode_latents(self, images: torch.Tensor):
-        """
-        Encode the given images to compressed latent space.
-
-        Args:
-            images (`torch.Tensor`): The images to encode.
-
-        Returns:
-            The encoded latents.
-        """
-        with torch.no_grad():
-            images = self.img_vae.encode(images)["latent_dist"].sample()
-            latents = self.latent_scale_factor * images
-
-        return latents
 
     def train(self, eval_interval: int):
         """
@@ -237,7 +327,7 @@ class Trainer:
 
         self.cur_epoch = self.num_epochs
         self.evaluate(self.net, self.test_dataloader)
-        self._save("model-final")
+        self._save_checkpoint("model-final")
 
     def _gather(self, metrics: OrderedDict):
         """Gather the metrics across all processes."""
@@ -245,12 +335,6 @@ class Trainer:
         if self.accelerator.is_local_main_process:
             global_metrics = {k: v.mean().item() for k, v in global_metrics.items()}
         return global_metrics
-
-    @accelerator.on_main_process
-    def _update_ema(self):
-        """Update the EMA model."""
-        self.ema.to(self.device)
-        self.ema.update()
 
     def _train_one_epoch(self):
         """Train the model for one epoch."""
@@ -298,8 +382,7 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
-        """
-        Evaluate the model on the given dataloader.
+        """Evaluate the model on the given dataloader.
 
         Args:
             net (`torch.nn.Module`): The model to evaluate.
@@ -346,8 +429,7 @@ class Trainer:
 
     @torch.no_grad()
     def get_probs(self, net: torch.nn.Module, dataloader: DataLoader):
-        """
-        Get the computed probabilities.
+        """Get the computed probabilities.
 
         Args:
             net (`torch.nn.Module`): The model to use for computing probabilities.
@@ -377,62 +459,3 @@ class Trainer:
         net.train()
 
         return torch.cat(probs, dim=0)
-
-    def _compute_norms(self):
-        """Compute the gradient and parameter norms."""
-        grad_norm = 0.0
-        for p in self.net.parameters():
-            if p.grad is not None:
-                grad_norm += p.grad.norm(2) ** 2
-        grad_norm = grad_norm**0.5
-
-        param_norm = 0.0
-        for p in self.net.parameters():
-            param_norm += p.norm(2) ** 2
-        param_norm = param_norm**0.5
-
-        return grad_norm, param_norm
-
-    @accelerator.on_main_process
-    def _save(self, filename: str):
-        """
-        Save a checkpoint file.
-
-        Args:
-            filename (`str`): The name of the file to save.
-        """
-        data = {
-            "epoch": self.cur_epoch,
-            "net": self.accelerator.unwrap_model(self.net).state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "ema": self.ema.state_dict(),
-        }
-        self.print_fn(f"Saving checkpoint to {filename}...")
-        torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
-
-    def _load(self):
-        """
-        Load the latest checkpoint specified by `self.resume_from`.\n
-
-        If `self.resume_from` is a directory, then the latest checkpoint is loaded from that directory.\n
-        If `self.resume_from` is a file, then the checkpoint is loaded from that file.\n
-        If `self.resume_from` is `None`, then no checkpoint is loaded.
-        """
-        if self.resume_from is None:
-            return
-
-        ckpt = self.resume_from
-        if self.resume_from.endswith(".pt"):
-            pt_files = [f for f in os.listdir(self.resume_from) if f.endswith(".pt")]
-            ckpt = os.path.join(self.resume_from, pt_files[-1])
-
-        self.print_fn(f"Resuming from {ckpt}...")
-        data = torch.load(ckpt, weights_only=True)
-
-        self.cur_epoch = data["epoch"]
-        self.accelerator.unwrap_model(self.net).load_state_dict(data["net"])
-        self.optimizer.load_state_dict(data["optimizer"])
-
-        if self.accelerator.is_main_process:
-            self.ema.load_state_dict(data["ema"])
-            self.ema.to(self.device)

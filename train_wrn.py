@@ -46,7 +46,7 @@ def main(**kwargs):
     print_fn = accelerator.print
     trainer_kwargs = dnnlib.EasyDict()
 
-    # Dataset/loader options
+    # Dataset options
     trainer_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
     trainer_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
     trainer_kwargs.test_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.test_dir)
@@ -93,7 +93,7 @@ def main(**kwargs):
     match opts.exp_type:
         case "active":
             trainer = WRNActiveLearningTrainer(num_samples=opts.num_samples, calibrate=opts.calibrate, strategy=opts.strategy, **trainer_kwargs)
-            trainer.run_active_learning(eval_interval=opts.eval_interval)
+            trainer.run_active_learning_loop(eval_interval=opts.eval_interval)
         case "baseline":
             trainer = trainer_wrn.Trainer(**trainer_kwargs)
             trainer.train(eval_interval=opts.eval_interval)

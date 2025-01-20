@@ -8,6 +8,10 @@ from exp_utils import create_output_directory, generate_run_id, parse_int_list
 from training import trainer_egc
 from training.trainer_active import EGCActiveLearningTrainer
 
+import warnings
+
+warnings.filterwarnings("ignore", "Grad strides do not match bucket view strides")  # False warning printed by PyTorch 1.12.
+
 
 @click.command()
 
@@ -46,7 +50,7 @@ from training.trainer_active import EGCActiveLearningTrainer
 @click.option("--seed", help="Random seed", metavar="INT", type=int, default=1)
 @click.option("--eval_interval", help="Interval to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=1), default=100, show_default=True)
 @click.option("--log_interval", help="Interval to log the training metrics", metavar="TICKS", type=click.IntRange(min=1), default=10, show_default=True)
-@click.option("--save_interval", help="Interval to save the model", metavar="TICKS", type=click.IntRange(min=1), default=5000, show_default=True)
+@click.option("--save_interval", help="Interval to save the model", metavar="TICKS", type=click.IntRange(min=0), default=5000, show_default=True)
 @click.option("--exp_type", help="Experiment type", metavar="STR", type=click.Choice(["baseline", "active"]), default="baseline", show_default=True)
 def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
@@ -54,7 +58,7 @@ def main(**kwargs):
     print_fn = accelerator.print
     trainer_kwargs = dnnlib.EasyDict()
 
-    # Dataset/loader options
+    # Dataset options
     trainer_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
     trainer_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
     trainer_kwargs.test_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.test_dir)
@@ -121,7 +125,7 @@ def main(**kwargs):
     match opts.exp_type:
         case "active":
             trainer = EGCActiveLearningTrainer(num_samples=opts.num_samples, strategy=opts.strategy, **trainer_kwargs)
-            trainer.run_active_learning(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
+            trainer.run_active_learning_loop(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
         case "baseline":
             trainer = trainer_egc.Trainer(**trainer_kwargs)
             trainer.train(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)

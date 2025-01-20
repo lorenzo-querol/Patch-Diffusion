@@ -24,7 +24,13 @@ accelerator = Accelerator()
 
 
 class Trainer:
-    """Trainer for EGC."""
+    """
+    Trainer for EGC.
+
+    A more cleaned-up version of the main method proposed in https://openaccess.thecvf.com/content/ICCV2023/papers/Guo_EGC_Image_Generation_and_Classification_via_a_Diffusion_Energy-Based_Model_ICCV_2023_paper.pdf.
+
+    This implementation also incorporates Patch Diffusion as proposed in https://openreview.net/forum?id=iv2sTQtbst.
+    """
 
     def __init__(
         self,
@@ -82,6 +88,7 @@ class Trainer:
         self.train_on_latents = train_on_latents
         self.seed = seed
         self.resume_from = resume_from
+        self.al_mul = 0
 
         self.ece = ECELoss(n_bins=10)
 
@@ -90,6 +97,7 @@ class Trainer:
             log_with="wandb",
             gradient_accumulation_steps=self.accum_steps,
         )
+        self.accelerator.init_trackers(project_name="EGC")
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
 
@@ -120,7 +128,7 @@ class Trainer:
         self._prepare_dataloaders()
         self._build_network_and_diffusion()
         self._prepare_patch_info()
-        self._load()
+        self._load_checkpoint()
 
         # NOTE: We need to initialize the diffusion model after loading the checkpoint if it exists
         self.diffusion = dnnlib.util.construct_class_by_name(**self.diffusion_kwargs, model=self.accelerator.unwrap_model(self.net))
@@ -276,7 +284,7 @@ class Trainer:
         self.ema.update()
 
     @accelerator.on_main_process
-    def _sample_images(self, num_images=64):
+    def _sample_images(self, filename: str, num_images=64):
         """
         Sample images from the EMA model and save them.
 
@@ -303,7 +311,7 @@ class Trainer:
             samples = self._decode_latents(samples)
 
         image_grid = torchvision.utils.make_grid(samples, nrow=int(math.sqrt(num_images)), normalize=True, scale_each=True)
-        fname = os.path.join(self.run_dir, f"sample-{self.cur_step}.png")
+        fname = os.path.join(self.run_dir, f"{filename}.png")
         torchvision.utils.save_image(image_grid, fname)
 
     def _decode_latents(self, latents: torch.Tensor):
@@ -347,12 +355,10 @@ class Trainer:
             save_interval (`int`): When to save the model.
         """
 
+        self.cur_step = 0
         self.print_fn(f"Training for {self.num_steps - self.cur_step} steps...")
         self.print_fn("")
 
-        self.accelerator.init_trackers(project_name="EGC")
-
-        self.cur_step = 0
         for step in range(self.num_steps):
             self.cur_step = step
 
@@ -368,23 +374,24 @@ class Trainer:
                 self._report_metrics(metrics)
 
             if save_interval > 0 and self.cur_step % save_interval == 0:
-                self._save(f"model-{self.cur_step}")
-                self._sample_images()
+                self._save_checkpoint(f"model-{self.cur_step}")
+                self._sample_images(f"sample-{self.cur_step}")
 
         self.cur_step = self.num_steps
         metrics = self.evaluate(self.net, self.val_dataloader)
         self._report_metrics(metrics)
-        self._save("model-final")
-        self._sample_images()
+        self._save_checkpoint("model-final")
+        self._sample_images("sample-final")
 
     def _training_step(self):
         """Perform a single training step."""
         metrics = {}
 
+        self.net.train()
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.ce_weight > 0:
-            cls_images, cls_labels = next(self.cls_dataloader)
+            cls_images, cls_labels = get_batch_data(self.cls_dataloader)
 
             if self.train_on_latents:
                 cls_images = self._encode_latents(cls_images)
@@ -449,6 +456,7 @@ class Trainer:
         metrics = {"val_cls_loss": [], "val_cls_acc": [], "val_cls_ece": []}
 
         net.eval()
+
         for images, labels in dataloader:
             labels = labels.argmax(dim=1)
 
@@ -463,8 +471,6 @@ class Trainer:
             metrics["val_cls_loss"].append(torch.nn.functional.cross_entropy(logits, labels))
             metrics["val_cls_acc"].append((logits.argmax(dim=1) == labels).float().mean())
             metrics["val_cls_ece"].append(self.ece(logits, labels))
-
-        net.train()
 
         metrics = {k: torch.stack(v).mean() for k, v in metrics.items()}
 
@@ -537,10 +543,10 @@ class Trainer:
                 global_metrics[name] = global_avg
                 self.print_fn(f"{name} = {global_avg:.6f}")
 
-        self.accelerator.log(global_metrics, step=self.cur_step)
+        self.accelerator.log(global_metrics, step=self.cur_step + (self.al_mul * self.num_steps))
 
     @accelerator.on_main_process
-    def _save(self, filename: str):
+    def _save_checkpoint(self, filename: str):
         """
         Save a checkpoint file.
 
@@ -556,9 +562,9 @@ class Trainer:
         self.print_fn(f"Saving checkpoint to {filename}...")
         torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
 
-    def _load(self):
+    def _load_checkpoint(self):
         """
-        Load the latest checkpoint specified by `self.resume_from`.\n
+        Load the latest checkpoint specified by `self.resume_from`.
 
         If `self.resume_from` is a directory, then the latest checkpoint is loaded from that directory.\n
         If `self.resume_from` is a file, then the checkpoint is loaded from that file.\n

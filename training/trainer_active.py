@@ -5,6 +5,7 @@ from torch_uncertainty.post_processing import TemperatureScaler
 
 from training.trainer_egc import Trainer as EGCTrainer
 from training.trainer_wrn import Trainer as WRNTrainer
+from training.utils import cycle
 
 
 class ActiveLearningTrainer:
@@ -29,13 +30,6 @@ class ActiveLearningTrainer:
         self.labeled_indices = np.random.choice(all_indices, size=self.num_samples, replace=False)
         self.unlabeled_indices = np.setdiff1d(all_indices, self.labeled_indices)
         self._update_dataloaders()
-
-    def _update_dataloaders(self):
-        """Update dataloaders with the new labeled and unlabeled indices."""
-
-        dataset = Subset(self.base_trainer.cls_dataset, self.labeled_indices)
-        dataloader = DataLoader(dataset, **self.base_trainer.dataloader_kwargs)
-        self.base_trainer.cls_dataloader = self.base_trainer.accelerator.prepare(dataloader)
 
     def least_confidence_query(self, net: torch.nn.Module):
         """
@@ -161,7 +155,7 @@ class ActiveLearningTrainer:
         self.base_trainer.print_fn(f"Labeled: {len(self.labeled_indices)}, Unlabeled: {len(self.unlabeled_indices)}")
         self.base_trainer.print_fn(f"Class distribution: {distribution.cpu().numpy().tolist()}")
 
-    def run_active_learning(self, *args, **kwargs):
+    def run_active_learning_loop(self, *args, **kwargs):
         """Run active learning loop."""
 
         self.cur_al_iteration = 1
@@ -176,7 +170,12 @@ class ActiveLearningTrainer:
                 model = TemperatureScaler(model=self.base_trainer.net, device=self.base_trainer.device)
                 model.fit(calibration_set=self.base_trainer.val_dataset)
 
-            self.base_trainer._save(f"al_iter-{self.cur_al_iteration}")
+            self.base_trainer._save_checkpoint(f"al_iter-{self.cur_al_iteration}")
+
+            if hasattr(self.base_trainer, "_sample_images"):
+                self.base_trainer._sample_images(f"al_iter-{self.cur_al_iteration}")
+
+            self.base_trainer.accelerator.wait_for_everyone()
 
             if len(self.unlabeled_indices) == 0:
                 self.base_trainer.print_fn("Unlabeled set is exhausted, stopping active learning...")
@@ -186,6 +185,7 @@ class ActiveLearningTrainer:
                 model = self.base_trainer.net
 
             self._active_learning_step(model)
+            self.base_trainer.al_mul += 1
 
 
 class WRNActiveLearningTrainer(ActiveLearningTrainer):
@@ -193,8 +193,25 @@ class WRNActiveLearningTrainer(ActiveLearningTrainer):
         base_trainer = WRNTrainer(**trainer_kwargs)
         super().__init__(base_trainer, num_samples, calibrate, strategy)
 
+    def _update_dataloaders(self):
+        """Update dataloaders with the new labeled and unlabeled indices."""
+
+        dataset = Subset(self.base_trainer.cls_dataset, self.labeled_indices)
+        dataloader = DataLoader(dataset, **self.base_trainer.dataloader_kwargs)
+        self.base_trainer.cls_dataloader = self.base_trainer.accelerator.prepare(dataloader)
+
 
 class EGCActiveLearningTrainer(ActiveLearningTrainer):
     def __init__(self, num_samples: float, strategy="random", **trainer_kwargs):
         base_trainer = EGCTrainer(**trainer_kwargs)
         super().__init__(base_trainer, num_samples, calibrate=False, strategy=strategy)
+
+    def _update_dataloaders(self):
+        """Update dataloaders with the new labeled and unlabeled indices."""
+
+        dataset = Subset(self.base_trainer.cls_dataset, self.labeled_indices)
+        dataloader = DataLoader(dataset, **self.base_trainer.dataloader_kwargs)
+        self.base_trainer.cls_dataloader = self.base_trainer.accelerator.prepare(dataloader)
+
+        # NOTE: EGC is trained in a semi-supervised manner
+        self.base_trainer.cls_dataloader = cycle(self.base_trainer.cls_dataloader)
