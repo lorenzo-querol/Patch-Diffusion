@@ -2,10 +2,10 @@
 
 seeds=(1 2 3 4 5)
 strategies=(lc)
-dataset_name=("bloodmnist_256" "dermamnist_256")
-dataset_dir="./data/${dataset_name}"
+datasets=("dermamnist_256")
 
-for dataset_name in "${dataset_name[@]}"; do
+for dataset_name in "${datasets[@]}"; do
+    dataset_dir="./data/${dataset_name}"
     for seed in "${seeds[@]}"; do
         for strategy in "${strategies[@]}"; do
             accelerate launch train_wrn.py \
@@ -20,7 +20,7 @@ for dataset_name in "${dataset_name[@]}"; do
                 --decay_epochs=60,120,160 \
                 --decay_rate=0.2 \
                 --depth=28 \
-                --width_factor=10 \
+                --width_factor=12 \
                 --dropout_rate=0.3 \
                 --lr=1e-4 \
                 --seed=$seed \

@@ -124,6 +124,7 @@ class BaseTrainer:
         self.val_dataset = dnnlib.util.construct_class_by_name(**self.val_dataset_kwargs, transform=transform)
         self.test_dataset = dnnlib.util.construct_class_by_name(**self.test_dataset_kwargs, transform=transform)
 
+    @torch.no_grad()
     def _encode_latents(self, images: torch.Tensor):
         """Encode the given images to compressed latent space.
 
@@ -133,9 +134,13 @@ class BaseTrainer:
         Returns:
             The encoded latents.
         """
-        with torch.no_grad():
-            images = self.img_vae.encode(images)["latent_dist"].sample()
-            latents = self.latent_scale_factor * images
+        self.channel_expand = torch.nn.Conv2d(1, 3, kernel_size=1).to(self.device)
+
+        if images.shape[1] == 1:
+            images = self.channel_expand(images)
+
+        images = self.img_vae.encode(images)["latent_dist"].sample()
+        latents = self.latent_scale_factor * images
 
         return latents
 
