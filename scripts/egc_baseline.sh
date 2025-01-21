@@ -1,9 +1,10 @@
 #!/bin/bash
 
 dataset_dir="./data/bloodmnist_224"
+seed=(1)
 
 accelerate launch train_egc.py \
-    --outdir=egc-runs \
+    --outdir=egc-runs/baseline \
     --train_dir=${dataset_dir}/train \
     --val_dir=${dataset_dir}/val \
     --test_dir=${dataset_dir}/test \

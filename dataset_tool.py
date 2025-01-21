@@ -35,8 +35,14 @@ def save_dataset(images, labels, dest):
         # Convert from CHW to HWC format and scale to 0-255 range
         img_np = (np.transpose(img, (1, 2, 0)) * 255).astype(np.uint8)
 
-        # Save as RGB image
-        img_pil = PIL.Image.fromarray(img_np, "RGB")
+        # Save as grayscale or RGB image
+        is_grayscale = img_np.shape[-1] == 1
+
+        if is_grayscale:
+            img_pil = PIL.Image.fromarray(img_np.squeeze(), "L")
+        else:
+            img_pil = PIL.Image.fromarray(img_np, "RGB")
+
         img_pil.save(file_path, format="png")
 
         label_dict[archive_fname] = int(label.item())
@@ -64,11 +70,12 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
     elif dataset == "mnist":
         trainset = torchvision.datasets.MNIST(root="../tmp", train=True, download=True, transform=transforms.ToTensor())
         testset = torchvision.datasets.MNIST(root="../tmp", train=False, download=True, transform=transforms.ToTensor())
-    elif dataset in ["bloodmnist"]:
+    elif dataset in ["bloodmnist", "dermamnist", "organcmnist", "organsmnist"]:
         assert resolution in [28, 64, 128, 224], f"Unsupported resolution: {resolution} for MedMNIST datasets"
         info = INFO[dataset]
         DataClass = getattr(medmnist, info["python_class"])
         resize = 256 if resolution == 224 else resolution
+        resize = 32 if resolution == 28 else resolution
 
         kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
         trainset = DataClass(split="train", size=resolution, mmap_mode="r", **kwargs)
@@ -99,6 +106,14 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
     test_labels = np.array([label for _, label in testset])
 
     if resolution is not None:
+        resized_resolutions = {
+            28: 32,
+            224: 256,
+        }
+
+        if resolution in resized_resolutions:
+            resolution = resized_resolutions[resolution]
+
         train_name = f"{dataset}_{resolution}"
         dataset = train_name
 

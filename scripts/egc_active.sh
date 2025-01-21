@@ -2,7 +2,7 @@
 
 seeds=(1)
 strategies=(lc)
-dataset_dir="./data/bloodmnist_224"
+dataset_dir="./data/bloodmnist_256"
 
 # NOTE: Only difference from EGC paper was the LR used, instead of 1e-4, we used 5e-5
 # This was done to prevent the model from overfitting too quickly and diverging

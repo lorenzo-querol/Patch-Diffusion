@@ -3,8 +3,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torch_uncertainty.post_processing import TemperatureScaler
 
-from training.trainer_egc import Trainer as EGCTrainer
-from training.trainer_wrn import Trainer as WRNTrainer
+from training.trainer_egc import EGCTrainer
+from training.trainer_wrn import WRNTrainer
 from training.utils import cycle
 
 
@@ -31,6 +31,18 @@ class ActiveLearningTrainer:
         self.unlabeled_indices = np.setdiff1d(all_indices, self.labeled_indices)
         self._update_dataloaders()
 
+    def random_query(self):
+        """
+        Query samples randomly.
+
+        Returns:
+            query_indices (np.ndarray): The indices of the samples to query.
+        """
+        query_size = min(self.num_samples, len(self.unlabeled_indices))
+        query_indices = np.random.choice(self.unlabeled_indices, size=query_size, replace=False)
+
+        return query_indices
+
     def least_confidence_query(self, net: torch.nn.Module):
         """
         Query samples using least confidence strategy.
@@ -45,75 +57,12 @@ class ActiveLearningTrainer:
         dataloader = DataLoader(unlabeled_dataset, **self.dataloader_kwargs)
 
         probs = self.base_trainer.get_probs(net, dataloader)
-        probs = self.base_trainer.accelerator.gather_for_metrics(probs)
-        probs = probs[: len(self.unlabeled_indices)]
-        lc_scores = 1 - torch.max(probs, dim=1).values
+        all_probs = self.base_trainer.accelerator.gather_for_metrics(probs)
+        all_probs = all_probs[: len(self.unlabeled_indices)]
+        lc_scores = 1 - torch.max(all_probs, dim=1).values
 
         query_size = min(self.num_samples, len(self.unlabeled_indices))
         sorted_indices = torch.argsort(lc_scores, descending=True)[:query_size].cpu().numpy()
-        query_indices = self.unlabeled_indices[sorted_indices]
-
-        return query_indices
-
-    def random_query(self):
-        """
-        Query samples randomly.
-
-        Returns:
-            query_indices (np.ndarray): The indices of the samples to query.
-        """
-        query_size = min(self.num_samples, len(self.unlabeled_indices))
-        query_indices = np.random.choice(self.unlabeled_indices, size=query_size, replace=False)
-
-        return query_indices
-
-    def smallest_margin_query(self, net: torch.nn.Module):
-        """
-        Query samples using smallest margin strategy.
-
-        Args:
-            net (torch.nn.Module): The model to use for querying.
-
-        Returns:
-            query_indices (np.ndarray): The indices of the samples to query.
-        """
-        unlabeled_dataset = Subset(self.base_trainer.cls_dataset, self.unlabeled_indices)
-        dataloader = DataLoader(unlabeled_dataset, **self.dataloader_kwargs)
-
-        probs = self.base_trainer.get_probs(net, dataloader)
-        all_probs = self.base_trainer.accelerator.gather_for_metrics(probs)
-        all_probs = all_probs[: len(self.unlabeled_indices)]
-
-        top2_probs, _ = torch.topk(all_probs, k=2, dim=1)
-        margin = top2_probs[:, 0] - top2_probs[:, 1]
-
-        query_size = min(self.num_samples, len(self.unlabeled_indices))
-        sorted_indices = torch.argsort(margin)[:query_size].cpu().numpy()
-        query_indices = self.unlabeled_indices[sorted_indices]
-
-        return query_indices
-
-    def entropy_query(self, net: torch.nn.Module):
-        """
-        Query samples using entropy.
-
-        Args:
-            net (torch.nn.Module): The model to use for querying.
-
-        Returns:
-            query_indices (np.ndarray): The indices of the samples to query.
-        """
-        unlabeled_dataset = Subset(self.base_trainer.cls_dataset, self.unlabeled_indices)
-        dataloader = DataLoader(unlabeled_dataset, **self.dataloader_kwargs)
-
-        probs = self.base_trainer.get_probs(net, dataloader)
-        all_probs = self.base_trainer.accelerator.gather_for_metrics(probs)
-        all_probs = all_probs[: len(self.unlabeled_indices)]
-
-        entropy = -torch.sum(all_probs * torch.log(all_probs + 1e-10), dim=1)
-
-        query_size = min(self.num_samples, len(self.unlabeled_indices))
-        sorted_indices = torch.argsort(entropy, descending=True)[:query_size].cpu().numpy()
         query_indices = self.unlabeled_indices[sorted_indices]
 
         return query_indices
@@ -124,15 +73,12 @@ class ActiveLearningTrainer:
         Args:
             net (torch.nn.Module): The model to use for querying.
         """
+
         match self.strategy:
             case "lc":
                 query_indices = self.least_confidence_query(net)
             case "random":
                 query_indices = self.random_query()
-            case "sm":
-                query_indices = self.smallest_margin_query(net)
-            case "entropy":
-                query_indices = self.entropy_query(net)
             case _:
                 raise NotImplementedError(f"Active learning strategy {self.strategy} not implemented.")
 
@@ -170,7 +116,7 @@ class ActiveLearningTrainer:
                 model = TemperatureScaler(model=self.base_trainer.net, device=self.base_trainer.device)
                 model.fit(calibration_set=self.base_trainer.val_dataset)
 
-            self.base_trainer._save_checkpoint(f"al_iter-{self.cur_al_iteration}")
+            self.base_trainer._save_checkpoint(f"model-al_iter_{self.cur_al_iteration}-final")
 
             if hasattr(self.base_trainer, "_sample_images"):
                 self.base_trainer._sample_images(f"al_iter-{self.cur_al_iteration}")
@@ -190,7 +136,7 @@ class ActiveLearningTrainer:
 
 class WRNActiveLearningTrainer(ActiveLearningTrainer):
     def __init__(self, num_samples: float, calibrate=False, strategy="random", **trainer_kwargs):
-        base_trainer = WRNTrainer(**trainer_kwargs)
+        base_trainer = WRNTrainer(**trainer_kwargs, active_learning=True)
         super().__init__(base_trainer, num_samples, calibrate, strategy)
 
     def _update_dataloaders(self):
@@ -203,7 +149,7 @@ class WRNActiveLearningTrainer(ActiveLearningTrainer):
 
 class EGCActiveLearningTrainer(ActiveLearningTrainer):
     def __init__(self, num_samples: float, strategy="random", **trainer_kwargs):
-        base_trainer = EGCTrainer(**trainer_kwargs)
+        base_trainer = EGCTrainer(**trainer_kwargs, active_learning=True)
         super().__init__(base_trainer, num_samples, calibrate=False, strategy=strategy)
 
     def _update_dataloaders(self):

@@ -5,7 +5,7 @@ from accelerate import Accelerator
 
 import dnnlib
 from exp_utils import create_output_directory, generate_run_id, parse_int_list
-from training import trainer_egc
+from training.trainer_egc import EGCTrainer
 from training.trainer_active import EGCActiveLearningTrainer
 
 import warnings
@@ -127,7 +127,7 @@ def main(**kwargs):
             trainer = EGCActiveLearningTrainer(num_samples=opts.num_samples, strategy=opts.strategy, **trainer_kwargs)
             trainer.run_active_learning_loop(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
         case "baseline":
-            trainer = trainer_egc.Trainer(**trainer_kwargs)
+            trainer = EGCTrainer(**trainer_kwargs)
             trainer.train(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
         case _:
             raise NotImplementedError(f"Experiment type {opts.exp_type} not implemented.")

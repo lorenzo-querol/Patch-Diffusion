@@ -14,9 +14,9 @@ python dataset_tool.py --dataset cifar10 \
 For MedMNIST datasets
 
 ```bash
-python dataset_tool.py --dataset bloodmnist \
+python dataset_tool.py --dataset organsmnist \
                        --dest ./data \
-                       --resolution 28
+                       --resolution 224
 ```
 
 ### Training

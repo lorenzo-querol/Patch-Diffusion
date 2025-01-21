@@ -5,7 +5,7 @@ from accelerate import Accelerator
 
 import dnnlib
 from exp_utils import create_output_directory, generate_run_id, parse_int_list
-from training import trainer_wrn
+from training.trainer_wrn import WRNTrainer
 from training.trainer_active import WRNActiveLearningTrainer
 
 
@@ -95,7 +95,7 @@ def main(**kwargs):
             trainer = WRNActiveLearningTrainer(num_samples=opts.num_samples, calibrate=opts.calibrate, strategy=opts.strategy, **trainer_kwargs)
             trainer.run_active_learning_loop(eval_interval=opts.eval_interval)
         case "baseline":
-            trainer = trainer_wrn.Trainer(**trainer_kwargs)
+            trainer = WRNTrainer(**trainer_kwargs)
             trainer.train(eval_interval=opts.eval_interval)
         case _:
             raise NotImplementedError(f"Experiment type {opts.exp_type} not implemented.")
