@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import torch
@@ -27,6 +28,7 @@ class WRNTrainer(BaseTrainer):
         optimizer_kwargs,
         decay_epochs: list[int] = [60, 120, 160],
         decay_rate: float = 0.2,
+        warmup_steps: int = 0,
         num_epochs: int = 200,
         accum_steps: int = 1,
         batch_size: int = 128,
@@ -61,6 +63,7 @@ class WRNTrainer(BaseTrainer):
         # WRN-specific attributes
         self.decay_epochs = decay_epochs
         self.decay_rate = decay_rate
+        self.warmup_steps = warmup_steps
         self.num_epochs = num_epochs
         self.calibrate = calibrate
         self.active_learning = active_learning
@@ -113,10 +116,10 @@ class WRNTrainer(BaseTrainer):
         self.net, self.optimizer = self.accelerator.prepare(self.net, self.optimizer)
 
     def _step_lr(self):
-        """Step the learning rate."""
-        if self.cur_epoch in self.decay_epochs:
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] *= self.decay_rate
+        """Cosine annealing learning rate scheduler."""
+        lr = self.optimizer_kwargs["lr"] * (1 + math.cos(math.pi * self.cur_epoch / self.num_epochs)) / 2
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
 
     def train(self, eval_interval: int):
         """Main training loop.
@@ -128,7 +131,6 @@ class WRNTrainer(BaseTrainer):
 
         for epoch in range(self.num_epochs):
             self.cur_epoch = epoch
-            self._step_lr()
             self._train_one_epoch()
 
             if eval_interval > 0 and self.cur_epoch % eval_interval == 0:
@@ -140,6 +142,8 @@ class WRNTrainer(BaseTrainer):
                     model.fit(calibration_set=self.base_trainer.val_dataset)
 
                 self.evaluate(model, self.test_dataloader)
+
+            self._step_lr()
 
         self.cur_epoch = self.num_epochs
         self.evaluate(self.net, self.test_dataloader)
@@ -159,11 +163,10 @@ class WRNTrainer(BaseTrainer):
             for images, labels in self.cls_dataloader:
                 pbar.update(1)
 
-                labels = labels.argmax(dim=1)
-
                 if self.train_on_latents:
                     images = self._encode_latents(images)
 
+                labels = labels.argmax(dim=1)
                 logits = self.net(images)
                 loss = torch.nn.functional.cross_entropy(logits, labels)
                 acc = (logits.argmax(dim=1) == labels).float().mean()
@@ -173,10 +176,9 @@ class WRNTrainer(BaseTrainer):
                 cls_acc_meter.update(acc, images.size(0))
                 cls_ece_meter.update(ece, images.size(0))
 
+                self.optimizer.zero_grad(set_to_none=True)
                 self.accelerator.backward(loss)
-
                 self.optimizer.step()
-                self.optimizer.zero_grad()
                 self._update_ema()
 
             metrics = {

@@ -13,13 +13,14 @@ for dataset_name in "${datasets[@]}"; do
             --test_dir=${dataset_dir}/test \
             --batch_size=128 \
             --cond=1 \
-            --num_epochs=200 \
+            --num_epochs=100 \
             --accum_steps=1 \
             --decay_epochs=60,120,160 \
             --decay_rate=0.2 \
+            --warmup_steps=1000 \
             --depth=28 \
             --width_factor=12 \
-            --dropout_rate=0.3 \
+            --dropout_rate=0.0 \
             --lr=1e-4 \
             --seed=$seed \
             --eval_interval=5 \

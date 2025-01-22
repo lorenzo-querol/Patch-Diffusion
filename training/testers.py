@@ -82,6 +82,7 @@ class Tester:
             self.img_vae.eval()
             self._set_requires_grad(self.img_vae, False)
 
+    @torch.no_grad()
     def _encode_latents(self, images: torch.Tensor):
         """
         Encode the given images to compressed latent space.
@@ -92,9 +93,14 @@ class Tester:
         Returns:
             The encoded latents.
         """
-        with torch.no_grad():
-            images = self.img_vae.encode(images)["latent_dist"].sample()
-            latents = self.latent_scale_factor * images
+
+        self.channel_expand = torch.nn.Conv2d(1, 3, kernel_size=1).to(self.device)
+
+        if images.shape[1] == 1:
+            images = self.channel_expand(images)
+
+        images = self.img_vae.encode(images)["latent_dist"].sample()
+        latents = self.latent_scale_factor * images
 
         return latents
 
@@ -130,8 +136,8 @@ class Tester:
     def _load_checkpoint(self, ckpt: str):
         """Load checkpoint."""
         data = torch.load(ckpt, weights_only=True)
-        self.net.load_state_dict(data["net"])
         self.ema.load_state_dict(data["ema"])
+        self.ema.ema_model.eval()
 
 
 class WRNTester(Tester):

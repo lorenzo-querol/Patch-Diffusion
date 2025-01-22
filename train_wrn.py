@@ -22,6 +22,7 @@ from training.trainer_active import WRNActiveLearningTrainer
 @click.option("--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--decay_epochs", help="Epochs to decay learning rate over", metavar="INT", type=parse_int_list, default=[60, 120, 160], show_default=True)
 @click.option("--decay_rate", help="Learning rate decay factor", metavar="FLOAT", type=click.FloatRange(min=0), default=0.2, show_default=True)
+@click.option("--warmup_steps", help="Number of warmup steps", metavar="INT", type=click.IntRange(min=0), default=0, show_default=True)
 @click.option("--train_on_latents", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
 
 # Active learning
@@ -65,6 +66,9 @@ def main(**kwargs):
     # Training options
     trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.accum_steps = opts.accum_steps
+    trainer_kwargs.decay_epochs = opts.decay_epochs
+    trainer_kwargs.decay_rate = opts.decay_rate
+    trainer_kwargs.warmup_steps = opts.warmup_steps
     trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.seed = opts.seed
     trainer_kwargs.resume_from = opts.resume_from
