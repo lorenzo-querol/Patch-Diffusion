@@ -24,7 +24,8 @@ dependencies:
   - wandb # added this line
   - pip
   - pip:
-    - imageio-ffmpeg
-    - pyspng
-    - ema-pytorch>=0.4.2 # added this line
-    - medmnist # added this line
+      - imageio-ffmpeg
+      - pyspng
+      - ema-pytorch>=0.4.2 # added this line
+      - medmnist # added this line
+      - torch-uncertainty # added this line

@@ -92,19 +92,24 @@ class ActiveLearningTrainer:
 
         labeled_dataset = Subset(self.base_trainer.cls_dataset, self.labeled_indices)
         dataloader = DataLoader(labeled_dataset, **self.dataloader_kwargs)
-
         distribution = torch.zeros(self.base_trainer.label_dim, dtype=torch.long)
+
         for _, targets in dataloader:
             targets = targets.argmax(dim=1)
             distribution += torch.bincount(targets.to(torch.long), minlength=self.base_trainer.label_dim)
 
+        distribution = distribution.cpu().numpy().tolist()
         self.base_trainer.print_fn(f"Labeled: {len(self.labeled_indices)}, Unlabeled: {len(self.unlabeled_indices)}")
-        self.base_trainer.print_fn(f"Class distribution: {distribution.cpu().numpy().tolist()}")
+        self.base_trainer.print_fn(f"Class distribution: {distribution}")
+
+        with open(self.base_trainer.log_dir / "class_distribution.csv", "a") as f:
+            f.write(",".join(map(str, distribution)) + "\n")
 
     def run_active_learning_loop(self, *args, **kwargs):
         """Run active learning loop."""
 
         self.cur_al_iteration = 1
+        self._log_distribution()
 
         while True:
             self.base_trainer.print_fn(f"\nActive learning iteration: {self.cur_al_iteration}")
@@ -131,6 +136,7 @@ class ActiveLearningTrainer:
                 model = self.base_trainer.net
 
             self._active_learning_step(model)
+            self._log_distribution()
             self.base_trainer.al_mul += 1
 
 
