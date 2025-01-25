@@ -7,7 +7,7 @@ for dataset_name in "${datasets[@]}"; do
     dataset_dir="./data/${dataset_name}"
     for seed in "${seeds[@]}"; do
         accelerate launch train_wrn.py \
-            --outdir=wrn-runs/${dataset_name}/${strategy} \
+            --outdir=wrn-runs/${dataset_name}/least_conf \
             --train_dir=${dataset_dir}/train \
             --val_dir=${dataset_dir}/val \
             --test_dir=${dataset_dir}/test \
@@ -20,7 +20,7 @@ for dataset_name in "${datasets[@]}"; do
             --warmup_steps=1000 \
             --depth=28 \
             --width_factor=12 \
-            --dropout_rate=0.3 \
+            --dropout_rate=0.0 \
             --lr=1e-4 \
             --seed=$seed \
             --eval_interval=5 \

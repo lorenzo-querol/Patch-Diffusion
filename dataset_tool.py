@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Callable, Optional, Tuple, Union
+from typing import Optional
 
 import click
 import medmnist
@@ -35,14 +35,8 @@ def save_dataset(images, labels, dest):
         # Convert from CHW to HWC format and scale to 0-255 range
         img_np = (np.transpose(img, (1, 2, 0)) * 255).astype(np.uint8)
 
-        # Save as grayscale or RGB image
         is_grayscale = img_np.shape[-1] == 1
-
-        if is_grayscale:
-            img_pil = PIL.Image.fromarray(img_np.squeeze(), "L")
-        else:
-            img_pil = PIL.Image.fromarray(img_np, "RGB")
-
+        img_pil = PIL.Image.fromarray(img_np, "L" if is_grayscale else "RGB")
         img_pil.save(file_path, format="png")
 
         label_dict[archive_fname] = int(label.item())

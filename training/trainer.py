@@ -161,13 +161,18 @@ class BaseTrainer:
         self.ema.update()
 
     @accelerator.on_main_process
-    def _save_checkpoint(self, filename: str):
+    def _save_checkpoint(self, filename: str, additional_data: dict = None):
         """Save a checkpoint file.
 
         Args:
             filename (`str`): The name of the file to save.
+            additional_data (`dict`): Additional data to save in the checkpoint.
         """
-        data = {"ema": self.ema.state_dict()}
+        data = {"net": self.accelerator.unwrap_model(self.net).state_dict(), "ema": self.ema.state_dict()}
+
+        if additional_data:
+            data.update(additional_data)
+
         self.print_fn(f"Saving checkpoint to {filename}...")
         torch.save(data, os.path.join(self.run_dir, f"{filename}.pt"))
 

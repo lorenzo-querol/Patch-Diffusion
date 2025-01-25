@@ -61,8 +61,7 @@ class Tester:
         self.test_dataloader = DataLoader(test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
     def _set_requires_grad(self, model: torch.nn.Module, requires_grad: bool):
-        """
-        Set requires_grad for all parameters in the model.
+        """Set requires_grad for all parameters in the model.
 
         Args:
             model (torch.nn.Module): The model to set `requires_grad` for.
@@ -84,8 +83,7 @@ class Tester:
 
     @torch.no_grad()
     def _encode_latents(self, images: torch.Tensor):
-        """
-        Encode the given images to compressed latent space.
+        """Encode the given images to compressed latent space.
 
         Args:
             images (`torch.Tensor`): The images to encode.
@@ -117,8 +115,7 @@ class Tester:
             self._save_metrics(ckpt_name, metrics)
 
     def _save_metrics(self, ckpt_name: str, metrics: dict):
-        """
-        Save metrics to a CSV file.
+        """Save metrics to a CSV file.
 
         Args:
             ckpt_name (str): Checkpoint name.
@@ -148,8 +145,7 @@ class WRNTester(Tester):
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
-        """
-        Evaluate the model on the test dataset.
+        """Evaluate the model on the test dataset.
 
         Args:
             net (torch.nn.Module): Model to test.
@@ -213,8 +209,7 @@ class EGCTester(Tester):
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
-        """
-        Evaluate the model on the test dataset.
+        """Evaluate the model on the test dataset.
 
         Args:
             net (torch.nn.Module): Model to test.

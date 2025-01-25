@@ -32,8 +32,7 @@ def cycle(dataloader: DataLoader):
 
 
 def linear_beta_schedule(timesteps: int):
-    """
-    Linear schedule proposed in https://arxiv.org/abs/2006.11239.
+    """Linear schedule proposed in [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239).
 
     Args:
         timesteps (int): The number of timesteps.
@@ -45,12 +44,11 @@ def linear_beta_schedule(timesteps: int):
 
 
 def cosine_beta_schedule(timesteps: int, s=0.008):
-    """
-    Cosine schedule proposed in https://openreview.net/forum?id=-NEXDKk8gZ.
+    """Cosine schedule proposed in [Improved Denoising Diffusion Probabilistic Models](https://openreview.net/forum?id=-NEXDKk8gZ).
 
     Args:
         timesteps (int): The number of timesteps.
-        s (float,optional, defaults to `0.008`): The scaling factor.
+        s (float,optional): The scaling factor. Defaults to 0.008.
     """
     steps = timesteps + 1
     t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
@@ -61,8 +59,7 @@ def cosine_beta_schedule(timesteps: int, s=0.008):
 
 
 def get_beta_schedule(schedule_name: str, timesteps: int):
-    """
-    Get the beta schedule based on the schedule name.
+    """Get the beta schedule based on the schedule name.
 
     Args:
         schedule_name (str): The name of the schedule. Can be `linear` or `cosine`.

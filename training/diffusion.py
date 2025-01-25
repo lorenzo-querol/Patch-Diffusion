@@ -7,8 +7,20 @@ from training.utils import get_beta_schedule, extract
 
 
 class GaussianDiffusionTrainer(torch.nn.Module):
-    def __init__(self, model, target="epsilon", schedule_name="linear", timesteps=1000):
+    """Gaussian Diffusion Trainer"""
+
+    def __init__(self, model: torch.nn.Module, target: str = "epsilon", schedule_name: str = "linear", timesteps: int = 1000):
+        """
+        Args:
+            model (`torch.nn.Module`): The model to train.
+            target (`str`, optional): The target of the diffusion model. Can be "epsilon", "x_0", or "v". Defaults to "epsilon".
+            schedule_name (`str`): The name of the schedule to use for the diffusion model. Can be "linear" or "cosine". Defaults to "linear".
+            timesteps (`int`): The number of timesteps to use for the diffusion model. Defaults to 1000.
+        """
         super().__init__()
+        assert target in ["epsilon", "x_0", "v"], f"Invalid target {target}. Must be one of ['epsilon', 'x_0', 'v']."
+        assert schedule_name in ["linear", "cosine"], f"Invalid schedule_name {schedule_name}. Must be one of ['linear', 'cosine']."
+
         self.model = model
         self.T = timesteps
         self.target = target
@@ -66,8 +78,19 @@ class GaussianDiffusionTrainer(torch.nn.Module):
 
 
 class DDIMSampler(torch.nn.Module):
-    def __init__(self, model, target="epsilon", schedule_name="linear", timesteps=1000):
+    """DDIM Sampler"""
+
+    def __init__(self, model, target: str = "epsilon", schedule_name: str = "linear", timesteps: int = 1000):
+        """
+        Args:
+            model (`torch.nn.Module`): The model to train.
+            target (`str`, optional): The target of the diffusion model. Can be "epsilon", "x_0", or "v". Defaults to "epsilon".
+            schedule_name (`str`): The name of the schedule to use for the diffusion model. Can be "linear" or "cosine". Defaults to "linear".
+            timesteps (`int`): The number of timesteps to use for the diffusion model. Defaults to 1000.
+        """
         super().__init__()
+        assert target in ["epsilon", "x_0", "v"], f"Invalid target {target}. Must be one of ['epsilon', 'x_0', 'v']."
+        assert schedule_name in ["linear", "cosine"], f"Invalid schedule_name {schedule_name}. Must be one of ['linear', 'cosine']."
         self.model = model
         self.T = timesteps
         self.target = target
@@ -82,25 +105,32 @@ class DDIMSampler(torch.nn.Module):
         self.register_buffer("signal_rate", torch.sqrt(self.alpha_t_bar))
         self.register_buffer("noise_rate", torch.sqrt(1.0 - self.alpha_t_bar))
 
-    @torch.no_grad()
-    def sample_one_step(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0):
+    def _setup_sampling_step(self, x_t, time_step, prev_time_step):
         t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
         prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
 
-        # get current and previous alpha_cumprod
         alpha_t = extract(self.alpha_t_bar, t, x_t.shape)
         alpha_t_prev = extract(self.alpha_t_bar, prev_t, x_t.shape)
 
-        # predict noise using model
-        epsilon_theta_t = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
+        return t, prev_t, alpha_t, alpha_t_prev
 
-        # Classifier-Free Guidance
-        if guidance_scale > 1.0:
-            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
-            epsilon_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
-            epsilon_theta_t = epsilon_uncond + guidance_scale * (epsilon_theta_t - epsilon_uncond)
+    def _apply_guidance(self, pred, x_in, t, class_labels, guidance_scale):
+        if guidance_scale == 1.0:
+            return pred
 
-        # calculate x_{t-1}
+        uncond_labels = torch.ones_like(class_labels, device=x_in.device, dtype=torch.long)
+        uncond_pred = self.model(x_in, t, class_labels=uncond_labels)
+        return uncond_pred + guidance_scale * (pred - uncond_pred)
+
+    @torch.no_grad()
+    def sample_one_step(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0):
+        t, prev_t, alpha_t, alpha_t_prev = self._setup_sampling_step(x_t, time_step, prev_time_step)
+        x_in = torch.cat([x_t, pos], dim=1)
+
+        epsilon_theta_t = self.model(x_in, t, class_labels=class_labels)
+        epsilon_theta_t = self._apply_guidance(epsilon_theta_t, x_in, t, class_labels, guidance_scale)
+
+        # Compute x_{t-1}
         sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
         epsilon_t = torch.randn_like(x_t)
         x_t_minus_one = (
@@ -110,21 +140,11 @@ class DDIMSampler(torch.nn.Module):
 
     @torch.no_grad()
     def sample_one_step_x_0(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0):
-        t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
-        prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
+        t, prev_t, alpha_t, alpha_t_prev = self._setup_sampling_step(x_t, time_step, prev_time_step)
+        x_in = torch.cat([x_t, pos], dim=1)
 
-        # Get current and previous alpha_cumprod
-        alpha_t = extract(self.alpha_t_bar, t, x_t.shape)
-        alpha_t_prev = extract(self.alpha_t_bar, prev_t, x_t.shape)
-
-        # Predict x_0 using the model
-        x_0 = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
-
-        # Classifier-Free Guidance
-        if guidance_scale > 1.0:
-            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
-            x_0_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
-            x_0 = x_0_uncond + guidance_scale * (x_0 - x_0_uncond)
+        x_0 = self.model(x_in, t, class_labels=class_labels)
+        x_0 = self._apply_guidance(x_0, x_in, t, class_labels, guidance_scale)
 
         # Compute x_{t-1} using the predicted x_0
         sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
@@ -135,23 +155,14 @@ class DDIMSampler(torch.nn.Module):
 
     @torch.no_grad()
     def sample_one_step_v(self, x_t, pos, class_labels, time_step: int, prev_time_step: int, eta: float, guidance_scale: float = 1.0, clip_denoised: bool = True, clip_value: int = 3):
-        t = torch.full((x_t.shape[0],), time_step, device=x_t.device, dtype=torch.long)
-        prev_t = torch.full((x_t.shape[0],), prev_time_step, device=x_t.device, dtype=torch.long)
-
-        # get current and previous alpha_cumprod
-        alpha_t = extract(self.alpha_t_bar, t, x_t.shape)
-        alpha_t_prev = extract(self.alpha_t_bar, prev_t, x_t.shape).clip(min=0)
+        t, prev_t, alpha_t, alpha_t_prev = self._setup_sampling_step(x_t, time_step, prev_time_step)
+        x_in = torch.cat([x_t, pos], dim=1)
 
         sigma_t = extract(1 - self.alpha_t_bar, t, x_t.shape)
-        sigma_t_prev = extract(1 - self.alpha_t_bar, prev_t, x_t.shape).clip(min=0)
+        sigma_t_prev = extract(1 - self.alpha_t_bar, prev_t, x_t.shape)
 
-        v = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=class_labels)
-
-        # Classifier-Free Guidance
-        if guidance_scale > 1.0:
-            uncond_labels = torch.ones_like(class_labels, device=x_t.device, dtype=torch.long)
-            v_uncond = self.model(torch.cat([x_t, pos], dim=1), t, class_labels=uncond_labels)
-            v = v_uncond + guidance_scale * (v - v_uncond)
+        v = self.model(x_in, t, class_labels=class_labels)
+        v = self._apply_guidance(v, x_in, t, class_labels, guidance_scale)
 
         pred = x_t * alpha_t - v * sigma_t
 
@@ -173,50 +184,49 @@ class DDIMSampler(torch.nn.Module):
         return pred
 
     @torch.no_grad()
-    def forward(self, x_t, pos, class_labels, steps: int = 1, method="linear", eta=0.0, guidance_scale: float = 1.0, only_return_x_0: bool = True, interval: int = 1):
+    def forward(self, x_t, pos, class_labels, steps: int = 1, method: str = "linear", eta: float = 0.0, guidance_scale: float = 1.0, only_return_x_0: bool = True, interval: int = 1):
         """
-        Parameters:
-            x_t: Standard Gaussian noise. A tensor with shape (batch_size, channels, height, width).
-            steps: Sampling steps.
-            method: Sampling method, can be "linear" or "quadratic".
-            eta: Coefficients of sigma parameters in the paper. The value 0 indicates DDIM, 1 indicates DDPM.
-            guidance_scale: Scale for classifier-free guidance.
-            only_return_x_0: Determines whether the image is saved during the sampling process. if True,
-                intermediate pictures are not saved, and only return the final result $x_0$.
-            interval: This parameter is valid only when `only_return_x_0 = False`. Decide the interval at which
+        Args:
+            x_t (`torch.Tensor`): The input tensor with shape `(batch_size, channels, height, width)`.
+            pos (`torch.Tensor`): The positional encoding tensor with shape `(batch_size, 2, height, width)`.
+            class_labels (`torch.Tensor`): The class labels tensor with shape `(batch_size,)`.
+            steps (`int`): The number of steps to sample. Defaults to 1.
+            method (`str`): The method to use for sampling. Can be "linear" or "quadratic". Defaults to "linear".
+            eta (`float`):  Coefficients of sigma parameters in the paper. The value 0 indicates DDIM, 1 indicates DDPM. Defaults to 0.0.
+            guidance_scale (`float`): Scale for classifier-Free guidance. Defaults to 1.0.
+            only_return_x_0 (`bool`): Determines whether the image is saved during the sampling process. if True, intermediate pictures are not saved, and only return the final result x_0.
+            interval (`int`): This parameter is valid only when `only_return_x_0 = False`. Decide the interval at which
                 to save the intermediate process pictures, according to `step`.
-                $x_t$ and $x_0$ will be included, no matter what the value of `interval` is.
+                `x_t` and `x_0` will be included, no matter what the value of `interval` is.
 
         Returns:
-            if `only_return_x_0 = True`, will return a tensor with shape (batch_size, channels, height, width),
-            otherwise, return a tensor with shape (batch_size, sample, channels, height, width),
-            include intermediate pictures.
+            If `only_return_x_0 = True`, will return a tensor with shape `(batch_size, channels, height, width)`,
+            otherwise, return a tensor with shape `(batch_size, sample, channels, height, width)`,
+            including intermediate samples.
         """
-        if method == "linear":
-            a = self.T // steps
-            time_steps = np.asarray(list(range(0, self.T, a)))
-        elif method == "quadratic":
-            time_steps = (np.linspace(0, np.sqrt(self.T * 0.8), steps) ** 2).astype(np.int64)
-        else:
-            raise NotImplementedError(f"sampling method {method} is not implemented!")
+        match method:
+            case "linear":
+                a = self.T // steps
+                time_steps = np.asarray(list(range(0, self.T, a)))
+            case "quadratic":
+                time_steps = (np.linspace(0, np.sqrt(self.T * 0.8), steps) ** 2).astype(np.int64)
+            case _:
+                raise NotImplementedError(f"Sampling method {method} unrecognized.")
 
-        # add one to get the final alpha values right (the ones from first scale to data during sampling)
         time_steps = time_steps + 1
-        # previous sequence
         time_steps_prev = np.concatenate([[0], time_steps[:-1]])
 
         x = [x_t]
-        with tqdm(reversed(range(0, steps)), desc="Sampling", colour="#6565b5", total=steps) as sampling_steps:
+        with tqdm(reversed(range(0, steps)), desc="DDIM Sampling", total=steps) as sampling_steps:
             for i in sampling_steps:
 
-                if self.target == "epsilon":
-                    x_t = self.sample_one_step(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
-                elif self.target == "x_0":
-                    x_t = self.sample_one_step_x_0(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
-                elif self.target == "v":
-                    x_t = self.sample_one_step_v(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
-                else:
-                    raise NotImplementedError(f"target {self.target} is not implemented!")
+                match self.target:
+                    case "epsilon":
+                        x_t = self.sample_one_step(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
+                    case "x_0":
+                        x_t = self.sample_one_step_x_0(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
+                    case "v":
+                        x_t = self.sample_one_step_v(x_t, pos, class_labels, time_steps[i], time_steps_prev[i], eta, guidance_scale)
 
                 if not only_return_x_0 and ((steps - i) % interval == 0 or i == 0):
                     x.append(x_t)

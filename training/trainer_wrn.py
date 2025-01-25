@@ -242,10 +242,8 @@ class WRNTrainer(BaseTrainer):
             self.print_fn(f"Saving best model with val loss: {metrics['val_cls_loss']:.4f}")
             self.best_val_loss = metrics["val_cls_loss"]
 
-            if self.active_learning:
-                self._save_checkpoint(f"model-al_iter_{self.al_mul+1}-best")
-            else:
-                self._save_checkpoint("model-best")
+            filename = "model-best" if not self.active_learning else f"model-al_iter_{self.al_mul+1}-best"
+            self._save_checkpoint(filename, {"val_loss": self.best_val_loss})
 
         self.accelerator.log(metrics, step=self.cur_epoch + (self.al_mul * self.num_epochs))
 

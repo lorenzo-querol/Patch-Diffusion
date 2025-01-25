@@ -24,9 +24,10 @@ class ECELoss(nn.Module):
     2015.
     """
 
-    def __init__(self, n_bins=15):
+    def __init__(self, n_bins: int = 15):
         """
-        n_bins (int): number of confidence interval bins
+        Args:
+            n_bins (int): number of confidence interval bins. Defaults to 15.
         """
         super(ECELoss, self).__init__()
         bin_boundaries = torch.linspace(0, 1, n_bins + 1)

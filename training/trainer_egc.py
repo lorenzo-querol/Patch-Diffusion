@@ -25,9 +25,11 @@ class EGCTrainer(BaseTrainer):
     """
     Trainer for EGC.
 
-    A more cleaned-up version of the main method proposed in https://openaccess.thecvf.com/content/ICCV2023/papers/Guo_EGC_Image_Generation_and_Classification_via_a_Diffusion_Energy-Based_Model_ICCV_2023_paper.pdf.
+    A more cleaned-up version of the main method proposed in
+    [EGC: Image Generation and Classification via a Diffusion Energy-Based Model](https://openaccess.thecvf.com/content/ICCV2023/papers/Guo_EGC_Image_Generation_and_Classification_via_a_Diffusion_Energy-Based_Model_ICCV_2023_paper.pdf).
 
-    This implementation also incorporates Patch Diffusion as proposed in https://openreview.net/forum?id=iv2sTQtbst.
+    This implementation also incorporates Patch Diffusion as proposed in
+    [Patch Diffusion: Faster and More Data-Efficient Training of Diffusion Models](https://proceedings.neurips.cc/paper_files/paper/2023/file/e4667dd0a5a54b74019b72b677ed8ec1-Paper-Conference.pdf).
     """
 
     def __init__(
@@ -191,11 +193,11 @@ class EGCTrainer(BaseTrainer):
 
     @accelerator.on_main_process
     def _sample_images(self, filename: str, num_images=64):
-        """
-        Sample images from the EMA model and save them.
+        """Sample images from the EMA model and save them.
 
         Args:
-            num_images (`int`, optional, defaults to `64`): Number of images to sample.
+            filename (`str`): Filename to save the images.
+            num_images (`int`, optional): Number of images to sample. Defaults to 64.
         """
         self.ema.ema_model.eval()
 
@@ -222,8 +224,7 @@ class EGCTrainer(BaseTrainer):
         torchvision.utils.save_image(image_grid, fname)
 
     def train(self, log_interval: int, eval_interval: int, save_interval: int):
-        """
-        Main training loop.
+        """Main training loop.
 
         Args:
             log_interval (`int`): When to log the metrics.
@@ -372,17 +373,14 @@ class EGCTrainer(BaseTrainer):
             self.print_fn(f"Saving best model with val loss: {metrics['val_cls_loss']:.4f}")
             self.best_val_loss = metrics["val_cls_loss"]
 
-            if self.active_learning:
-                self._save_checkpoint(f"model-al_iter_{self.al_mul+1}-best")
-            else:
-                self._save_checkpoint("model-best")
+            filename = "model-best" if not self.active_learning else f"model-al_iter_{self.al_mul+1}-best"
+            self._save_checkpoint(filename, {"val_loss": self.best_val_loss})
 
         self.accelerator.log(metrics, step=self.cur_step + (self.al_mul * self.num_steps))
 
     @torch.no_grad()
     def get_probs(self, net: torch.nn.Module, dataloader: DataLoader):
-        """
-        Get the computed probabilities.
+        """Get the computed probabilities.
 
         Args:
             net (`torch.nn.Module`): The model to use for computing probabilities.

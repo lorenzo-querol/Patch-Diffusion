@@ -32,8 +32,7 @@ class ActiveLearningTrainer:
         self._update_dataloaders()
 
     def random_query(self):
-        """
-        Query samples randomly.
+        """Query samples randomly.
 
         Returns:
             query_indices (np.ndarray): The indices of the samples to query.
@@ -44,8 +43,7 @@ class ActiveLearningTrainer:
         return query_indices
 
     def least_confidence_query(self, net: torch.nn.Module):
-        """
-        Query samples using least confidence strategy.
+        """Query samples using least confidence strategy.
 
         Args:
             net (torch.nn.Module): The model to use for querying.
@@ -102,8 +100,9 @@ class ActiveLearningTrainer:
         self.base_trainer.print_fn(f"Labeled: {len(self.labeled_indices)}, Unlabeled: {len(self.unlabeled_indices)}")
         self.base_trainer.print_fn(f"Class distribution: {distribution}")
 
-        with open(self.base_trainer.log_dir / "class_distribution.csv", "a") as f:
-            f.write(",".join(map(str, distribution)) + "\n")
+        if self.base_trainer.accelerator.is_main_process:
+            with open(f"{self.base_trainer.run_dir}/class_distribution.csv", "a") as f:
+                f.write(",".join(map(str, distribution)) + "\n")
 
     def run_active_learning_loop(self, *args, **kwargs):
         """Run active learning loop."""
