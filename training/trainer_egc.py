@@ -267,32 +267,44 @@ class EGCTrainer(BaseTrainer):
 
         self.net.train()
 
-        cls_images, cls_labels = get_batch_data(self.cls_dataloader)
+        accum_cls_loss = torch.tensor(0.0, device=self.device)
+        accum_cls_acc = torch.tensor(0.0, device=self.device)
+        accum_cls_ece = torch.tensor(0.0, device=self.device)
 
-        if self.train_on_latents:
-            cls_images = self._encode_latents(cls_images)
+        for _ in range(self.accum_steps):
+            cls_images, cls_labels = get_batch_data(self.cls_dataloader)
 
-        cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
+            if self.train_on_latents:
+                cls_images = self._encode_latents(cls_images)
 
-        with self.accelerator.no_sync(self.net):
-            logits, ce_loss, weighted_ce_loss = self.diffusion(cls_images, cls_labels, cls_mode=True)
-            acc = (logits.argmax(dim=1) == cls_labels).float().mean()
-            ece = self.ece(logits, cls_labels)
+            self.print_fn("cls_images shape: ", cls_images.shape)
+            cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
 
-            self.accelerator.backward(self.ce_weight * weighted_ce_loss)
+            with self.accelerator.no_sync(self.net):
+                logits, ce_loss, weighted_ce_loss = self.diffusion(cls_images, cls_labels, cls_mode=True)
+                acc = (logits.argmax(dim=1) == cls_labels).float().mean()
+                ece = self.ece(logits, cls_labels).mean()
+
+                weighted_ce_loss = weighted_ce_loss / self.accum_steps
+                accum_cls_loss += ce_loss.mean() / self.accum_steps
+                accum_cls_acc += acc / self.accum_steps
+                accum_cls_ece += ece / self.accum_steps
+
+                self.accelerator.backward(self.ce_weight * weighted_ce_loss)
 
         patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
         batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
 
         accum_mse_loss = torch.tensor(0.0, device=self.device)
-        for _ in range(self.accum_steps):
 
+        for _ in range(self.accum_steps):
             images, labels = get_batch_data(self.train_dataloader, batch_mul)
             images, labels = images.to(self.device), labels.to(self.device)
 
             if self.train_on_latents:
                 images = self._encode_latents(images)
 
+            self.print_fn("images shape: ", images.shape, "batch_mul: ", batch_mul)
             images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
 
             mse_loss = self.diffusion(images, labels)
@@ -310,9 +322,9 @@ class EGCTrainer(BaseTrainer):
         self._update_ema()
 
         metrics = {
-            "cls_loss": ce_loss.mean().clone().detach(),
-            "cls_acc": acc.clone().detach(),
-            "cls_ece": ece.clone().detach(),
+            "cls_loss": accum_cls_loss.mean().clone().detach(),
+            "cls_acc": accum_cls_acc.mean().clone().detach(),
+            "cls_ece": accum_cls_ece.mean().clone().detach(),
             "mse_loss": accum_mse_loss.mean().clone().detach(),
             "grad_norm": grad_norm.clone().detach(),
             "param_norm": param_norm.clone().detach(),
@@ -397,9 +409,7 @@ class EGCTrainer(BaseTrainer):
 
         net.eval()
 
-        with tqdm(
-            total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
-        ) as pbar:
+        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for images, _ in dataloader:
                 pbar.update(1)
 

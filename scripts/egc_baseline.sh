@@ -5,8 +5,8 @@ seeds=(1)
 datasets=("bloodmnist_256")
 
 for seed in "${seeds[@]}"; do
-    dataset_dir="./data/${dataset_name}"
     for dataset_name in "${datasets[@]}"; do
+        dataset_dir="./data/${dataset_name}"
         accelerate launch train_egc.py \
             --outdir=egc-runs/${dataset_name}/baseline \
             --train_dir=${dataset_dir}/train \

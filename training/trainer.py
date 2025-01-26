@@ -60,6 +60,7 @@ class BaseTrainer:
 
         self.accelerator = Accelerator(
             dataloader_config=DataLoaderConfiguration(dispatch_batches=True, split_batches=False),
+            gradient_accumulation_steps=self.accum_steps,
             log_with=None,
         )
         self.accelerator.init_trackers(project_name="EGC")
@@ -87,9 +88,7 @@ class BaseTrainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert (
-            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
-        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _prepare_datasets(self):
