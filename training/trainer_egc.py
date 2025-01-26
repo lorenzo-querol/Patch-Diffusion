@@ -102,8 +102,8 @@ class EGCTrainer(BaseTrainer):
         self.print_fn("Preparing dataloaders...")
         self.train_dataloader = DataLoader(self.train_dataset, **self.dataloader_kwargs)
         self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
-        self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        self.val_dataloader = DataLoader(self.val_dataset, **self.dataloader_kwargs)
+        self.test_dataloader = DataLoader(self.test_dataset, **self.dataloader_kwargs)
 
         self.train_dataloader, self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(
             self.train_dataloader,
@@ -277,7 +277,6 @@ class EGCTrainer(BaseTrainer):
             if self.train_on_latents:
                 cls_images = self._encode_latents(cls_images)
 
-            self.print_fn("cls_images shape: ", cls_images.shape)
             cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
 
             with self.accelerator.no_sync(self.net):
@@ -304,7 +303,6 @@ class EGCTrainer(BaseTrainer):
             if self.train_on_latents:
                 images = self._encode_latents(images)
 
-            self.print_fn("images shape: ", images.shape, "batch_mul: ", batch_mul)
             images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
 
             mse_loss = self.diffusion(images, labels)

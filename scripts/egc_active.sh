@@ -16,7 +16,7 @@ for seed in "${seeds[@]}"; do
             --test_dir=${dataset_dir}/test \
             --batch_size=128 \
             --cond=1 \
-            --num_steps=10000 \
+            --num_steps=5000 \
             --accum_steps=8 \
             --model_channels=256 \
             --channel_mult=1,2,3,4 \

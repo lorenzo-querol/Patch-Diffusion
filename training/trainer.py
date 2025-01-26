@@ -61,7 +61,7 @@ class BaseTrainer:
         self.accelerator = Accelerator(
             dataloader_config=DataLoaderConfiguration(dispatch_batches=True, split_batches=False),
             gradient_accumulation_steps=self.accum_steps,
-            log_with=None,
+            log_with="wandb",
         )
         self.accelerator.init_trackers(project_name="EGC")
         self.device = self.accelerator.device

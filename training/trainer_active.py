@@ -24,7 +24,7 @@ class ActiveLearningTrainer:
         self.calibrate = calibrate
         self.strategy = strategy
 
-        self.dataloader_kwargs = {"batch_size": 256, "num_workers": 4, "pin_memory": True, "drop_last": False}
+        self.dataloader_kwargs = {"batch_size": 128, "num_workers": 4, "pin_memory": True, "drop_last": False}
 
         all_indices = np.array(list(range(len(self.base_trainer.cls_dataset))))
         self.labeled_indices = np.random.choice(all_indices, size=self.num_samples, replace=False)
