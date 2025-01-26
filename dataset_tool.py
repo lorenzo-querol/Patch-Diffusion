@@ -36,6 +36,10 @@ def save_dataset(images, labels, dest):
         img_np = (np.transpose(img, (1, 2, 0)) * 255).astype(np.uint8)
 
         is_grayscale = img_np.shape[-1] == 1
+
+        if is_grayscale:
+            img_np = img_np.squeeze(-1)
+
         img_pil = PIL.Image.fromarray(img_np, "L" if is_grayscale else "RGB")
         img_pil.save(file_path, format="png")
 
@@ -68,8 +72,12 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
         assert resolution in [28, 64, 128, 224], f"Unsupported resolution: {resolution} for MedMNIST datasets"
         info = INFO[dataset]
         DataClass = getattr(medmnist, info["python_class"])
-        resize = 256 if resolution == 224 else resolution
-        resize = 32 if resolution == 28 else resolution
+
+        if resolution == 28:
+            resize = 32
+
+        if resolution == 224:
+            resize = 256
 
         kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
         trainset = DataClass(split="train", size=resolution, mmap_mode="r", **kwargs)

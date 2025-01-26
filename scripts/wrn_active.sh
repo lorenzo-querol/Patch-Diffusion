@@ -22,7 +22,7 @@ for dataset_name in "${datasets[@]}"; do
             --width_factor=12 \
             --dropout_rate=0.0 \
             --lr=1e-4 \
-            --seed=$seed \
+            --seed=${seed} \
             --eval_interval=5 \
             --exp_type=active \
             --num_samples=0.1 \

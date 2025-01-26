@@ -1,16 +1,16 @@
 #!/bin/bash
 
-seeds=(1)
-strategies=(lc)
-dataset_dir="./data/bloodmnist_256"
+seeds=(1 2 3 4 5)
+datasets=("bloodmnist_256" "dermamnist_256" "organcmnist_256" "organsmnist_256")
 
 # NOTE: Only difference from EGC paper was the LR used, instead of 1e-4, we used 5e-5
 # This was done to prevent the model from overfitting too quickly and diverging
 
 for seed in "${seeds[@]}"; do
-    for strategy in "${strategies[@]}"; do
+    for dataset_name in "${datasets[@]}"; do
+        dataset_dir="./data/${dataset_name}"
         accelerate launch train_egc.py \
-            --outdir=egc-runs/${strategy} \
+            --outdir=egc-runs/${dataset_name}/least_conf \
             --train_dir=${dataset_dir}/train \
             --val_dir=${dataset_dir}/val \
             --test_dir=${dataset_dir}/test \
@@ -29,11 +29,11 @@ for seed in "${seeds[@]}"; do
             --target=epsilon \
             --ce_weight=0.001 \
             --seed=${seed} \
-            --log_interval=10 \
-            --eval_interval=1000 \
+            --log_interval=1 \
+            --eval_interval=100 \
             --save_interval=0 \
             --exp_type=active \
-            --strategy=${strategy} \
+            --strategy=lc \
             --train_on_latents=1
     done
 done
