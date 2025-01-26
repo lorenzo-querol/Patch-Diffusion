@@ -266,51 +266,51 @@ class EGCTrainer(BaseTrainer):
         metrics = {}
 
         self.net.train()
-        self.optimizer.zero_grad(set_to_none=True)
 
-        if self.ce_weight > 0:
-            cls_images, cls_labels = get_batch_data(self.cls_dataloader)
-
-            if self.train_on_latents:
-                cls_images = self._encode_latents(cls_images)
-
-            cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
-
-            with self.accelerator.no_sync(self.net):
-                logits, ce_loss, weighted_ce_loss = self.diffusion(cls_images, cls_labels, cls_mode=True)
-                acc = (logits.argmax(dim=1) == cls_labels).float().mean()
-                ece = self.ece(logits, cls_labels)
-
-                self.accelerator.backward(self.ce_weight * weighted_ce_loss)
-
-        patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
-        batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
-
-        images, labels = get_batch_data(self.train_dataloader, batch_mul)
-        images, labels = images.to(self.device), labels.to(self.device)
+        cls_images, cls_labels = get_batch_data(self.cls_dataloader)
 
         if self.train_on_latents:
-            images = self._encode_latents(images)
+            cls_images = self._encode_latents(cls_images)
 
-        images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
+        cls_images, cls_labels = get_patches(cls_images, self.img_resolution), torch.cat([cls_labels, cls_labels]).argmax(dim=1)
 
-        mse_loss = self.diffusion(images, labels)
+        with self.accelerator.no_sync(self.net):
+            logits, ce_loss, weighted_ce_loss = self.diffusion(cls_images, cls_labels, cls_mode=True)
+            acc = (logits.argmax(dim=1) == cls_labels).float().mean()
+            ece = self.ece(logits, cls_labels)
 
-        self.accelerator.backward(mse_loss / batch_mul)
+            self.accelerator.backward(self.ce_weight * weighted_ce_loss)
 
-        if self.accelerator.sync_gradients:
-            self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+        accum_loss = torch.tensor(0.0, device=self.device)
+        for _ in range(self.accum_steps):
+            patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
+            batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
 
-        self.accelerator.wait_for_everyone()
+            images, labels = get_batch_data(self.train_dataloader, batch_mul)
+            images, labels = images.to(self.device), labels.to(self.device)
+
+            if self.train_on_latents:
+                images = self._encode_latents(images)
+
+            images, labels = get_patches(images, patch_size), labels.argmax(dim=1)
+
+            mse_loss = self.diffusion(images, labels)
+            mse_loss = mse_loss / self.accum_steps
+            accum_loss += mse_loss
+
+            self.accelerator.backward(mse_loss / batch_mul)
+
+        self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
+        grad_norm, param_norm = self._compute_norms()
         self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
         self._update_ema()
 
-        grad_norm, param_norm = self._compute_norms()
         metrics = {
             "cls_loss": ce_loss.mean().clone().detach(),
             "cls_acc": acc.clone().detach(),
             "cls_ece": ece.clone().detach(),
-            "mse_loss": mse_loss.mean().clone().detach(),
+            "mse_loss": accum_loss.mean().clone().detach(),
             "grad_norm": grad_norm.clone().detach(),
             "param_norm": param_norm.clone().detach(),
             "lr": torch.tensor(self.optimizer.param_groups[0]["lr"], device=self.device),
@@ -394,7 +394,9 @@ class EGCTrainer(BaseTrainer):
 
         net.eval()
 
-        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
+        with tqdm(
+            total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
+        ) as pbar:
             for images, _ in dataloader:
                 pbar.update(1)
 
