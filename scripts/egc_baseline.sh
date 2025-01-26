@@ -1,11 +1,12 @@
 #!/bin/bash
 
 seeds=(1)
-datasets=("bloodmnist_256" "dermamnist_256" "organcmnist_256" "organsmnist_256")
+# datasets=("bloodmnist_256" "dermamnist_256" "organcmnist_256" "organsmnist_256")
+datasets=("bloodmnist_256")
 
-for dataset_name in "${datasets[@]}"; do
+for seed in "${seeds[@]}"; do
     dataset_dir="./data/${dataset_name}"
-    for seed in "${seeds[@]}"; do
+    for dataset_name in "${datasets[@]}"; do
         accelerate launch train_egc.py \
             --outdir=egc-runs/${dataset_name}/baseline \
             --train_dir=${dataset_dir}/train \

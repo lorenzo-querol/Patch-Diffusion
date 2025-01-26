@@ -281,10 +281,11 @@ class EGCTrainer(BaseTrainer):
 
             self.accelerator.backward(self.ce_weight * weighted_ce_loss)
 
-        accum_loss = torch.tensor(0.0, device=self.device)
+        patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
+        batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
+
+        accum_mse_loss = torch.tensor(0.0, device=self.device)
         for _ in range(self.accum_steps):
-            patch_size = int(np.random.choice(self.patch_list, p=self.p_list))
-            batch_mul = self.batch_mul_dict[patch_size] // self.batch_mul_dict[self.img_resolution]
 
             images, labels = get_batch_data(self.train_dataloader, batch_mul)
             images, labels = images.to(self.device), labels.to(self.device)
@@ -296,12 +297,14 @@ class EGCTrainer(BaseTrainer):
 
             mse_loss = self.diffusion(images, labels)
             mse_loss = mse_loss / self.accum_steps
-            accum_loss += mse_loss
+            accum_mse_loss += mse_loss
 
             self.accelerator.backward(mse_loss / batch_mul)
 
         self.accelerator.clip_grad_norm_(self.net.parameters(), 1.0)
         grad_norm, param_norm = self._compute_norms()
+
+        self.accelerator.wait_for_everyone()
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self._update_ema()
@@ -310,7 +313,7 @@ class EGCTrainer(BaseTrainer):
             "cls_loss": ce_loss.mean().clone().detach(),
             "cls_acc": acc.clone().detach(),
             "cls_ece": ece.clone().detach(),
-            "mse_loss": accum_loss.mean().clone().detach(),
+            "mse_loss": accum_mse_loss.mean().clone().detach(),
             "grad_norm": grad_norm.clone().detach(),
             "param_norm": param_norm.clone().detach(),
             "lr": torch.tensor(self.optimizer.param_groups[0]["lr"], device=self.device),
