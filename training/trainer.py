@@ -88,7 +88,9 @@ class BaseTrainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert (
+            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
+        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _prepare_datasets(self):
@@ -109,13 +111,15 @@ class BaseTrainer:
                 transforms.RandomCrop(self.img_resolution),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5] * self.img_channels, std=[0.5] * self.img_channels),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
             ]
         )
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5] * self.img_channels, std=[0.5] * self.img_channels),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+                transforms.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
             ]
         )
 
@@ -134,11 +138,6 @@ class BaseTrainer:
         Returns:
             The encoded latents.
         """
-        self.channel_expand = torch.nn.Conv2d(1, 3, kernel_size=1).to(self.device)
-
-        if images.shape[1] == 1:
-            images = self.channel_expand(images)
-
         images = self.img_vae.encode(images)["latent_dist"].sample()
         latents = self.latent_scale_factor * images
 

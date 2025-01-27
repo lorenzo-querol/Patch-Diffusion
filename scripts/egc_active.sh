@@ -17,7 +17,7 @@ for seed in "${seeds[@]}"; do
             --batch_size=128 \
             --cond=1 \
             --num_steps=5000 \
-            --accum_steps=8 \
+            --accum_steps=4 \
             --model_channels=256 \
             --channel_mult=1,2,3,4 \
             --num_res_blocks=3 \
@@ -29,7 +29,7 @@ for seed in "${seeds[@]}"; do
             --target=epsilon \
             --ce_weight=0.001 \
             --seed=${seed} \
-            --log_interval=1 \
+            --log_interval=10 \
             --eval_interval=100 \
             --save_interval=0 \
             --exp_type=active \

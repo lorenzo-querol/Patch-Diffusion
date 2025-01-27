@@ -27,8 +27,11 @@ class ActiveLearningTrainer:
         self.dataloader_kwargs = {"batch_size": 128, "num_workers": 4, "pin_memory": True, "drop_last": False}
 
         all_indices = np.array(list(range(len(self.base_trainer.cls_dataset))))
+
+        np.random.seed(self.base_trainer.seed)
         self.labeled_indices = np.random.choice(all_indices, size=self.num_samples, replace=False)
         self.unlabeled_indices = np.setdiff1d(all_indices, self.labeled_indices)
+
         self._update_dataloaders()
 
     def random_query(self):
@@ -38,6 +41,7 @@ class ActiveLearningTrainer:
             query_indices (np.ndarray): The indices of the samples to query.
         """
         query_size = min(self.num_samples, len(self.unlabeled_indices))
+        np.random.seed(self.base_trainer.seed)
         query_indices = np.random.choice(self.unlabeled_indices, size=query_size, replace=False)
 
         return query_indices
