@@ -1,7 +1,7 @@
 #!/bin/bash
 
-seeds=(1 2 3 4 5)
-datasets=("bloodmnist_256" "dermamnist_256" "organcmnist_256" "organsmnist_256")
+seeds=(42)
+datasets=("dermamnist_256")
 
 for dataset_name in "${datasets[@]}"; do
     dataset_dir="./data/${dataset_name}"

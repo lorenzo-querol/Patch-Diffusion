@@ -231,8 +231,7 @@ class EGCTrainer(BaseTrainer):
             eval_interval (`int`): When to evaluate the model.
             save_interval (`int`): When to save the model.
         """
-
-        self.best_val_loss = float("inf")
+        self.best_val_ece = float("inf")
         self.cur_step = 0
         self.print_fn(f"Training for {self.num_steps - self.cur_step} steps...")
 
@@ -332,7 +331,7 @@ class EGCTrainer(BaseTrainer):
         metrics = self._gather(metrics)
         if self.cur_step % log_interval == 0:
             self._print_metrics(metrics)
-        self.accelerator.log(metrics, step=self.cur_step + (self.al_mul * self.num_steps))
+            self.accelerator.log(metrics, step=self.cur_step + (self.al_mul * self.num_steps))
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
@@ -382,12 +381,12 @@ class EGCTrainer(BaseTrainer):
             pbar.set_postfix(metrics)
             pbar.close()
 
-        if self.accelerator.is_main_process and metrics["val_cls_loss"] < self.best_val_loss:
-            self.print_fn(f"Saving best model with val loss: {metrics['val_cls_loss']:.4f}")
-            self.best_val_loss = metrics["val_cls_loss"]
+        if self.accelerator.is_main_process and metrics["val_cls_ece"] < self.best_val_ece:
+            self.print_fn(f"Saving best model with val_ece: {metrics['val_cls_ece']:.4f}")
+            self.best_val_ece = metrics["val_cls_ece"]
 
             filename = "model-best" if not self.active_learning else f"model-al_iter_{self.al_mul+1}-best"
-            self._save_checkpoint(filename, {"val_loss": self.best_val_loss})
+            self._save_checkpoint(filename, {"val_cls_ece": self.best_val_ece})
 
         self.accelerator.log(metrics, step=self.cur_step + (self.al_mul * self.num_steps))
 

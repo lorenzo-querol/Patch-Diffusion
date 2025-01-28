@@ -27,7 +27,7 @@ def generate_run_id(opts):
     run_dir = os.path.join(opts.outdir, f"{cur_run_id:05d}-run")
     assert not os.path.exists(run_dir)
 
-    return os.path.join(opts.outdir, f"{cur_run_id:05d}-run")
+    return run_dir
 
 
 def parse_int_list(s):

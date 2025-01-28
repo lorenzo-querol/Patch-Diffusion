@@ -60,7 +60,7 @@ def main(**kwargs):
         dropout_rate=opts.dropout_rate,
         use_bn=False,
     )
-    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
+    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.Adam", lr=opts.lr)
     trainer_kwargs.train_on_latents = opts.train_on_latents
 
     # Training options

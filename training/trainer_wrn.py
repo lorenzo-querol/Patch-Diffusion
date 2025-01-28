@@ -67,6 +67,7 @@ class WRNTrainer(BaseTrainer):
         self.num_epochs = num_epochs
         self.calibrate = calibrate
         self.active_learning = active_learning
+        self.best_score = 0.0
 
         self._init_trainer()
 
@@ -85,9 +86,7 @@ class WRNTrainer(BaseTrainer):
         self.cls_dataloader = DataLoader(self.cls_dataset, **self.dataloader_kwargs)
         self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
         self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, pin_memory=True, num_workers=4)
-        self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(
-            self.cls_dataloader, self.val_dataloader, self.test_dataloader
-        )
+        self.cls_dataloader, self.val_dataloader, self.test_dataloader = self.accelerator.prepare(self.cls_dataloader, self.val_dataloader, self.test_dataloader)
 
     def _build_network(self):
         """Setup network."""
@@ -128,7 +127,7 @@ class WRNTrainer(BaseTrainer):
             warmup_lr = self.optimizer_kwargs.lr * float(self.cur_iter) / float(self.warmup_steps)
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = warmup_lr
-        else:
+        elif self.warmup_steps > 0 and self.cur_iter >= self.warmup_steps:
             decay_iter = self.cur_iter - self.warmup_steps
             decay_steps = (self.num_epochs * len(self.cls_dataloader)) - self.warmup_steps
             for param_group in self.optimizer.param_groups:
@@ -140,7 +139,8 @@ class WRNTrainer(BaseTrainer):
         Args:
             eval_interval (`int`): When to evaluate the model.
         """
-        self.best_val_loss = float("inf")
+        # self.best_val_ece = float("inf")
+        # self.best_score = 0.0
         self.cur_iter = 0
 
         for epoch in range(self.num_epochs):
@@ -171,9 +171,7 @@ class WRNTrainer(BaseTrainer):
 
         self.net.train()
 
-        with tqdm(
-            total=len(self.cls_dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
-        ) as pbar:
+        with tqdm(total=len(self.cls_dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for images, labels in self.cls_dataloader:
                 pbar.update(1)
 
@@ -254,13 +252,17 @@ class WRNTrainer(BaseTrainer):
             pbar.set_postfix(metrics)
             pbar.close()
 
-        if self.accelerator.is_main_process and metrics["val_cls_loss"] < self.best_val_loss:
-            self.print_fn(f"Saving best model with val loss: {metrics['val_cls_loss']:.4f}")
-            self.best_val_loss = metrics["val_cls_loss"]
+        lambda_value = 0.5
+        score = metrics["val_cls_acc"] - (lambda_value * metrics["val_cls_ece"])
+        # if self.accelerator.is_main_process and metrics["val_cls_ece"] < self.best_val_ece:
+        if self.accelerator.is_main_process and score > self.best_score:
+            self.best_score = score
+            self.print_fn(f"Saving best model ({self.best_score:.4f}) with val_acc: {metrics['val_cls_acc']:.4f}, val_ece: {metrics['val_cls_ece']:.4f}")
 
-            filename = "model-best" if not self.active_learning else f"model-al_iter_{self.al_mul+1}-best"
-            self._save_checkpoint(filename, {"val_loss": self.best_val_loss})
+            filename = f"model-best-{self.cur_epoch}" if not self.active_learning else f"model-al_iter_{self.al_mul+1}-best-{self.cur_epoch}"
+            self._save_checkpoint(filename, {"val_cls_ece": metrics["val_cls_ece"], "val_cls_acc": metrics["val_cls_acc"]})
 
+        metrics.update({"custom_score": score})
         self.accelerator.log(metrics, step=self.cur_epoch + (self.al_mul * self.num_epochs))
 
     @torch.no_grad()
@@ -279,9 +281,7 @@ class WRNTrainer(BaseTrainer):
 
         net.eval()
 
-        with tqdm(
-            total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
-        ) as pbar:
+        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for images, _ in dataloader:
                 pbar.update(1)
 

@@ -63,7 +63,9 @@ class BaseTrainer:
             gradient_accumulation_steps=self.accum_steps,
             log_with="wandb",
         )
-        self.accelerator.init_trackers(project_name="EGC")
+        run_name = "_".join(self.run_dir.split("/"))
+        self.accelerator.init_trackers(project_name="EGC", init_kwargs={"wandb": {"name": run_name}})
+
         self.device = self.accelerator.device
         self.print_fn = self.accelerator.print
 
@@ -88,9 +90,7 @@ class BaseTrainer:
         """Calculate the batch size per device."""
         world_size = self.accelerator.num_processes
         per_device_batch_size = self.batch_size // (world_size * self.accelerator.gradient_accumulation_steps)
-        assert (
-            per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size
-        ), "Batch size must be divisible by num_processes * gradient_accumulation_steps."
+        assert per_device_batch_size * world_size * self.accelerator.gradient_accumulation_steps == self.batch_size, "Batch size must be divisible by num_processes * gradient_accumulation_steps."
         return per_device_batch_size
 
     def _prepare_datasets(self):
