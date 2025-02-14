@@ -71,22 +71,26 @@ class WRNTrainer(BaseTrainer):
         self.net, self.ema, self.optimizer = self.accelerator.prepare(self.net, self.ema, self.optimizer)
 
     def _step_lr(self):
-        """Step the learning rate. Uses cosine annealing with warmup.
+        # """Step the learning rate. Uses cosine annealing with warmup.
 
-        If `self.warmup_steps > 0`, then the learning rate is linearly increased from 0 to the initial learning rate.
-        Else, the learning rate is decayed using cosine annealing.
-        """
+        # If `self.warmup_steps > 0`, then the learning rate is linearly increased from 0 to the initial learning rate.
+        # Else, the learning rate is decayed using cosine annealing.
+        # """
 
-        if self.warmup_steps > 0 and self.cur_iter < self.warmup_steps:
-            warmup_lr = self.optimizer_kwargs.lr * float(self.cur_iter) / float(self.warmup_steps)
+        # if self.warmup_steps > 0 and self.cur_iter < self.warmup_steps:
+        #     warmup_lr = self.optimizer_kwargs.lr * float(self.cur_iter) / float(self.warmup_steps)
+        #     for param_group in self.optimizer.param_groups:
+        #         param_group["lr"] = warmup_lr
+
+        # elif self.warmup_steps > 0 and self.cur_iter >= self.warmup_steps:
+        #     decay_iter = self.cur_iter - self.warmup_steps
+        #     decay_steps = (self.num_epochs * len(self.datamodule.cls_dataloader)) - self.warmup_steps
+        #     for param_group in self.optimizer.param_groups:
+        #         param_group["lr"] = self.optimizer_kwargs.lr * (0.5 * (1 + math.cos(math.pi * decay_iter / decay_steps)))
+
+        if self.cur_epoch in [60, 120, 160]:
             for param_group in self.optimizer.param_groups:
-                param_group["lr"] = warmup_lr
-
-        elif self.warmup_steps > 0 and self.cur_iter >= self.warmup_steps:
-            decay_iter = self.cur_iter - self.warmup_steps
-            decay_steps = (self.num_epochs * len(self.datamodule.cls_dataloader)) - self.warmup_steps
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] = self.optimizer_kwargs.lr * (0.5 * (1 + math.cos(math.pi * decay_iter / decay_steps)))
+                param_group["lr"] *= 0.2
 
     def fit(self, eval_interval: int):
         """Main training loop.
@@ -101,6 +105,7 @@ class WRNTrainer(BaseTrainer):
 
         for epoch in range(self.num_epochs):
             self.cur_epoch = epoch
+            self._step_lr()
             self._train_one_epoch()
 
             if eval_interval > 0 and self.cur_epoch % eval_interval == 0:
@@ -119,7 +124,9 @@ class WRNTrainer(BaseTrainer):
 
         dataloader = self.datamodule.cls_dataloader
 
-        with tqdm(total=len(dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
+        with tqdm(
+            total=len(dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
+        ) as pbar:
             for images, labels in dataloader:
                 labels = labels.argmax(dim=1)
 
@@ -140,7 +147,6 @@ class WRNTrainer(BaseTrainer):
                 self.optimizer.step()
 
                 self._update_ema()
-                self._step_lr()
                 self.cur_iter += 1
                 pbar.update(1)
 
@@ -239,7 +245,9 @@ class WRNTrainer(BaseTrainer):
 
         net.eval()
 
-        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
+        with tqdm(
+            total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
+        ) as pbar:
             for images, _ in dataloader:
                 if self.train_on_latents:
                     images = self._encode_latents(images)

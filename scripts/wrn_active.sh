@@ -20,8 +20,10 @@ for dataset_name in "${datasets[@]}"; do
                 --warmup_steps=0 \
                 --depth=28 \
                 --width_factor=12 \
-                --dropout_rate=0.0 \
+                --dropout_rate=0.3 \
                 --lr=1e-4 \
+                --optimizer=adam \
+                --use_bn=0 \
                 --seed=${seed} \
                 --eval_interval=1 \
                 --exp_type=active \

@@ -9,7 +9,6 @@ from training.trainer_wrn import WRNTrainer
 
 
 @click.command()
-
 # Main
 @click.option("--outdir", help="Where to save the results", metavar="DIR", type=str, required=True)
 @click.option("--train_dir", help="Path to the train dataset", metavar="ZIP|DIR", type=str, required=True)
@@ -20,7 +19,7 @@ from training.trainer_wrn import WRNTrainer
 @click.option("--num_epochs", help="Number of training steps", metavar="INT", type=click.IntRange(min=1), default=200, show_default=True)
 @click.option("--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--warmup_steps", help="Number of warmup steps", metavar="INT", type=click.IntRange(min=0), default=0, show_default=True)
-@click.option("--train_on_latents", help="Training on latent embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
+@click.option("--train_on_latents", help="Training on late nt embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
 
 # Active learning
 @click.option("--num_samples", help="Number of samples to query", metavar="FLOAT", type=float, default=0.1, show_default=True)
@@ -31,6 +30,8 @@ from training.trainer_wrn import WRNTrainer
 @click.option("--width_factor", help="Width factor k", metavar="INT", type=click.IntRange(min=1), default=10, show_default=True)
 @click.option("--dropout_rate", help="Dropout rate", metavar="FLOAT", type=click.FloatRange(min=0, max=1), default=0.3, show_default=True)
 @click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=0.1, show_default=True)
+@click.option("--optimizer", help="Optimizer", metavar="str", type=click.Choice(["adam", "sgd"]), default="adam", show_default=True)
+@click.option("--use_bn", help="Use batch normalization", metavar="BOOL", type=bool, default=True, show_default=True)
 
 # I/O
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
@@ -46,9 +47,21 @@ def main(**kwargs):
     active_learning_kwargs = dnnlib.EasyDict()
 
     # Dataset options
-    datamodule_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
-    datamodule_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
-    datamodule_kwargs.test_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.test_dir)
+    datamodule_kwargs.dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.train_dir,
+    )
+    datamodule_kwargs.val_dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.val_dir,
+    )
+    datamodule_kwargs.test_dataset_kwargs = dnnlib.EasyDict(
+        class_name="training.dataset.ImageFolderDataset",
+        use_labels=opts.cond,
+        path=opts.test_dir,
+    )
     datamodule_kwargs.batch_size = opts.batch_size
 
     # Active learning options
@@ -61,9 +74,16 @@ def main(**kwargs):
         depth=opts.depth,
         width_factor=opts.width_factor,
         dropout_rate=opts.dropout_rate,
-        use_bn=False,
+        use_bn=opts.use_bn,
     )
-    trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
+
+    if opts.optimizer == "adam":
+        trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
+    elif opts.optimizer == "sgd":
+        trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.SGD", lr=opts.lr, momentum=0.9, weight_decay=5e-4)
+    else:
+        raise ValueError(f"Unsupported optimizer: {opts.optimizer}")
+    
     trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.train_on_latents = opts.train_on_latents
     trainer_kwargs.warmup_steps = opts.warmup_steps
@@ -92,6 +112,15 @@ def main(**kwargs):
     print_fn(f"Resume from:             {trainer_kwargs.resume_from}")
     print_fn(f"Random seed:             {trainer_kwargs.seed}")
     print_fn(f"Number of GPUs:          {accelerator.num_processes}")
+    print_fn()
+
+    # Network options
+    print_fn("Network options:")
+    print_fn(f"Depth:                   {trainer_kwargs.network_kwargs.depth}")
+    print_fn(f"Width factor:            {trainer_kwargs.network_kwargs.width_factor}")
+    print_fn(f"Dropout rate:            {trainer_kwargs.network_kwargs.dropout_rate}")
+    print_fn(f"Use batch normalization: {trainer_kwargs.network_kwargs.use_bn}")
+    print_fn(f"Optimizer:               {trainer_kwargs.optimizer_kwargs.class_name}")
     print_fn()
 
     print_fn("Creating output directory...")

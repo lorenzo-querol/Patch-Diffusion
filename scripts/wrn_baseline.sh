@@ -1,7 +1,7 @@
 #!/bin/bash
 
-seeds=(1)
-datasets=(dermamnist_256)
+seeds=(1 2 3 4 5)
+datasets=(bloodmnist_256 dermamnist_256 organamnist_256)
 
 for dataset_name in "${datasets[@]}"; do
     dataset_dir="./data/${dataset_name}"
@@ -18,8 +18,10 @@ for dataset_name in "${datasets[@]}"; do
             --warmup_steps=1000 \
             --depth=28 \
             --width_factor=12 \
-            --dropout_rate=0.0 \
-            --lr=1e-4 \
+            --dropout_rate=0.3 \
+            --lr=0.1 \
+            --optimizer=sgd \
+            --use_bn=1 \
             --seed=$seed \
             --eval_interval=1 \
             --exp_type=baseline \

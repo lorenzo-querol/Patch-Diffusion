@@ -14,8 +14,6 @@ import torchvision.transforms as transforms
 from medmnist import INFO
 from tqdm import tqdm
 
-# ----------------------------------------------------------------------------
-
 
 def save_dataset(images, labels, dest):
     print(f"Saving dataset to {dest}...")
@@ -68,8 +66,12 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
         trainset = torchvision.datasets.CIFAR100(root="../tmp", train=True, download=True, transform=transforms.ToTensor())
         testset = torchvision.datasets.CIFAR100(root="../tmp", train=False, download=True, transform=transforms.ToTensor())
     elif dataset == "mnist":
-        trainset = torchvision.datasets.MNIST(root="../tmp", train=True, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()]))
-        testset = torchvision.datasets.MNIST(root="../tmp", train=False, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()]))
+        trainset = torchvision.datasets.MNIST(
+            root="../tmp", train=True, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()])
+        )
+        testset = torchvision.datasets.MNIST(
+            root="../tmp", train=False, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()])
+        )
     elif dataset in ["bloodmnist", "dermamnist", "organamnist"]:
         assert resolution in [28, 64, 128, 224], f"Unsupported resolution: {resolution} for MedMNIST datasets"
 
