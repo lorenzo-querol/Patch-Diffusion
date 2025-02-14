@@ -5,8 +5,9 @@ from accelerate import Accelerator
 
 import dnnlib
 from exp_utils import create_output_directory, generate_run_id, parse_int_list
+from training.datamodule import EGCDataModule
 from training.trainer_egc import EGCTrainer
-from training.trainer_active import EGCActiveLearningTrainer
+from training.trainer_active import ActiveLearningTrainer
 
 import warnings
 
@@ -57,11 +58,14 @@ def main(**kwargs):
     accelerator = Accelerator()
     print_fn = accelerator.print
     trainer_kwargs = dnnlib.EasyDict()
+    datamodule_kwargs = dnnlib.EasyDict()
 
     # Dataset options
-    trainer_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
-    trainer_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
-    trainer_kwargs.test_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.test_dir)
+    datamodule_kwargs.dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.train_dir)
+    datamodule_kwargs.val_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.val_dir)
+    datamodule_kwargs.test_dataset_kwargs = dnnlib.EasyDict(class_name="training.dataset.ImageFolderDataset", use_labels=opts.cond, path=opts.test_dir)
+    datamodule_kwargs.batch_size = opts.batch_size
+    datamodule_kwargs.accum_steps = opts.accum_steps
 
     # Network options
     trainer_kwargs.network_kwargs = dnnlib.EasyDict(
@@ -87,30 +91,31 @@ def main(**kwargs):
     )
     trainer_kwargs.diffusion_kwargs = dnnlib.EasyDict(class_name="training.diffusion.GaussianDiffusionTrainer", target=opts.target, schedule_name=opts.schedule_name, timesteps=opts.timesteps)
     trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
-    trainer_kwargs.target = opts.target
-    trainer_kwargs.ce_weight = opts.ce_weight
-    trainer_kwargs.train_on_latents = opts.train_on_latents
 
     # Training options
     trainer_kwargs.num_steps = opts.num_steps
+    trainer_kwargs.target = opts.target
+    trainer_kwargs.ce_weight = opts.ce_weight
+    trainer_kwargs.train_on_latents = opts.train_on_latents
     trainer_kwargs.accum_steps = opts.accum_steps
-    trainer_kwargs.batch_size = opts.batch_size
     trainer_kwargs.seed = opts.seed
     trainer_kwargs.resume_from = opts.resume_from
     trainer_kwargs.run_dir = generate_run_id(opts)
 
+    # DataModule options
+    print_fn("DataModule options:")
+    print_fn(f"Dataset path:            {datamodule_kwargs.dataset_kwargs.path}")
+    print_fn(f"Validation path:         {datamodule_kwargs.val_dataset_kwargs.path}")
+    print_fn(f"Test path:               {datamodule_kwargs.test_dataset_kwargs.path}")
+    print_fn(f"Batch size:              {datamodule_kwargs.batch_size}")
     print_fn()
+
     print_fn("Training options:")
-    print_fn(json.dumps(trainer_kwargs, indent=2))
-    print_fn()
     print_fn(f"Output directory:        {trainer_kwargs.run_dir}")
-    print_fn(f"Dataset path:            {trainer_kwargs.dataset_kwargs.path}")
-    print_fn(f"Validation path:         {trainer_kwargs.val_dataset_kwargs.path}")
-    print_fn(f"Test path:               {trainer_kwargs.test_dataset_kwargs.path}")
-    print_fn(f"Batch size:              {trainer_kwargs.batch_size}")
     print_fn(f"Diffusion schedule:      {trainer_kwargs.diffusion_kwargs.schedule_name}")
     print_fn(f"Timesteps:               {trainer_kwargs.diffusion_kwargs.timesteps}")
     print_fn(f"Target:                  {trainer_kwargs.target}")
+    print_fn(f"Cross-entropy weight:    {trainer_kwargs.ce_weight}")
     print_fn(f"Training steps:          {trainer_kwargs.num_steps}")
     print_fn(f"Resume from:             {trainer_kwargs.resume_from}")
     print_fn(f"Random seed:             {trainer_kwargs.seed}")
@@ -120,15 +125,17 @@ def main(**kwargs):
 
     print_fn("Creating output directory...")
     if accelerator.is_main_process:
-        create_output_directory(trainer_kwargs)
+        create_output_directory(trainer_kwargs, datamodule_kwargs)
+
+    datamodule = EGCDataModule(**datamodule_kwargs)
 
     match opts.exp_type:
         case "active":
-            trainer = EGCActiveLearningTrainer(num_samples=opts.num_samples, strategy=opts.strategy, **trainer_kwargs)
-            trainer.run_active_learning_loop(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
+            trainer = ActiveLearningTrainer(datamodule=datamodule, num_samples=opts.num_samples, strategy=opts.strategy)
+            trainer.run_loop("egc", opts.log_interval, opts.eval_interval, opts.save_interval, **trainer_kwargs)
         case "baseline":
-            trainer = EGCTrainer(**trainer_kwargs)
-            trainer.train(log_interval=opts.log_interval, save_interval=opts.save_interval, eval_interval=opts.eval_interval)
+            trainer = EGCTrainer(**trainer_kwargs, datamodule=datamodule)
+            trainer.fit(opts.log_interval, opts.eval_interval, opts.save_interval)
         case _:
             raise NotImplementedError(f"Experiment type {opts.exp_type} not implemented.")
 

@@ -4,6 +4,8 @@ from typing import Optional
 
 import click
 import medmnist
+from medmnist_corrected import INFO as INFO_CORRECTED
+import medmnist_corrected
 import numpy as np
 import PIL.Image
 import torch
@@ -66,12 +68,10 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
         trainset = torchvision.datasets.CIFAR100(root="../tmp", train=True, download=True, transform=transforms.ToTensor())
         testset = torchvision.datasets.CIFAR100(root="../tmp", train=False, download=True, transform=transforms.ToTensor())
     elif dataset == "mnist":
-        trainset = torchvision.datasets.MNIST(root="../tmp", train=True, download=True, transform=transforms.ToTensor())
-        testset = torchvision.datasets.MNIST(root="../tmp", train=False, download=True, transform=transforms.ToTensor())
-    elif dataset in ["bloodmnist", "dermamnist", "organcmnist", "organsmnist"]:
+        trainset = torchvision.datasets.MNIST(root="../tmp", train=True, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()]))
+        testset = torchvision.datasets.MNIST(root="../tmp", train=False, download=True, transform=transforms.Compose([transforms.Resize(32), transforms.ToTensor()]))
+    elif dataset in ["bloodmnist", "dermamnist", "organamnist"]:
         assert resolution in [28, 64, 128, 224], f"Unsupported resolution: {resolution} for MedMNIST datasets"
-        info = INFO[dataset]
-        DataClass = getattr(medmnist, info["python_class"])
 
         if resolution == 28:
             resize = 32
@@ -79,10 +79,22 @@ def main(dataset: str, dest: str, val_ratio: Optional[float], resolution: int):
         if resolution == 224:
             resize = 256
 
-        kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
-        trainset = DataClass(split="train", size=resolution, mmap_mode="r", **kwargs)
-        validset = DataClass(split="val", size=resolution, mmap_mode="r", **kwargs)
-        testset = DataClass(split="test", size=resolution, mmap_mode="r", **kwargs)
+        if dataset == "dermamnist":
+            info = INFO_CORRECTED["dermamnist_corrected_224"]
+            DataClass = getattr(medmnist_corrected, info["python_class"])
+
+            kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
+            trainset = DataClass(split="train", **kwargs)
+            validset = DataClass(split="val", **kwargs)
+            testset = DataClass(split="test", **kwargs)
+        else:
+            info = INFO[dataset]
+            DataClass = getattr(medmnist, info["python_class"])
+
+            kwargs = {"root": "../tmp", "download": True, "transform": transforms.Compose([transforms.Resize(resize), transforms.ToTensor()])}
+            trainset = DataClass(split="train", size=resolution, mmap_mode="r", **kwargs)
+            validset = DataClass(split="val", size=resolution, mmap_mode="r", **kwargs)
+            testset = DataClass(split="test", size=resolution, mmap_mode="r", **kwargs)
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
 

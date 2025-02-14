@@ -15,7 +15,7 @@ for seed in "${seeds[@]}"; do
             --batch_size=128 \
             --cond=1 \
             --num_steps=100000 \
-            --accum_steps=8 \
+            --accum_steps=4 \
             --model_channels=256 \
             --channel_mult=1,2,3,4 \
             --num_res_blocks=3 \

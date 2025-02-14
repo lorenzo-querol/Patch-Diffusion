@@ -2,8 +2,7 @@ import torch
 
 
 def get_batch_data(dataset_iterator, batch_mul: int = 1):
-    """
-    Get a batch of data from the dataset iterator.
+    """Get a batch of data from the dataset iterator.
 
     Args:
         dataset_iterator: The dataset wrapped with a `cycle` or similar iterator function.
@@ -24,9 +23,7 @@ def get_batch_data(dataset_iterator, batch_mul: int = 1):
 
 
 def get_patches(images: torch.Tensor, patch_size: int, padding: int = None):
-    """
-    Extract random patches of square `patch_size`
-    from the input images and return them along with their positions.
+    """Extract random patches of square `patch_size` from the input images and return them along with their positions.
 
     Proposed in https://openreview.net/forum?id=iv2sTQtbst.
 

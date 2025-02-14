@@ -4,10 +4,17 @@ import re
 import dnnlib
 
 
-def create_output_directory(trainer_kwargs):
+def create_output_directory(trainer_kwargs, datamodule_kwargs, active_learning_kwargs=None):
     os.makedirs(trainer_kwargs.run_dir, exist_ok=True)
     with open(os.path.join(trainer_kwargs.run_dir, "training_options.json"), "wt") as f:
         json.dump(trainer_kwargs, f, indent=2)
+
+    with open(os.path.join(trainer_kwargs.run_dir, "datamodule_options.json"), "wt") as f:
+        json.dump(datamodule_kwargs, f, indent=2)
+
+    if active_learning_kwargs is not None:
+        with open(os.path.join(trainer_kwargs.run_dir, "active_learning_options.json"), "wt") as f:
+            json.dump(active_learning_kwargs, f, indent=2)
 
     dnnlib.util.Logger(
         file_name=os.path.join(trainer_kwargs.run_dir, "log.txt"),

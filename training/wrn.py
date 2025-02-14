@@ -77,6 +77,9 @@ class WideResNet(nn.Module):
         out = self.block2(out)
         out = self.block3(out)
         out = self.relu(self.bn1(out))
+
+        self.features = out  # For visualization
+
         out = self.avg_pool(out)
         out = out.view(-1, self.n_channels[3])
         return self.fc(out)

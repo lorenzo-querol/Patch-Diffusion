@@ -50,3 +50,29 @@ class ECELoss(nn.Module):
                 ece += torch.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
 
         return ece
+
+
+class ModelWithTemperature(torch.nn.Module):
+    """A thin decorator, which wraps a model with temperature scaling."""
+
+    def __init__(self, model: torch.nn.Module):
+        """
+        Args:
+            model (`torch.nn.Module`): The model to wrap.
+        """
+        super(ModelWithTemperature, self).__init__()
+        self.model = model
+        self.temperature = torch.nn.Parameter(torch.ones(1) * 1.5)
+
+    def forward(self, input):
+        logits = self.model(input)
+        return self.temperature_scale(logits)
+
+    def temperature_scale(self, logits: torch.Tensor):
+        """Perform temperature scaling on the logits.
+
+        Args:
+            logits (`torch.Tensor`): The logits to scale.
+        """
+        temperature = self.temperature.unsqueeze(1).expand(logits.size(0), logits.size(1))  # Expand temperature to match the size of logits
+        return logits / temperature

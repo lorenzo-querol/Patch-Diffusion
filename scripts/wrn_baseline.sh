@@ -1,7 +1,7 @@
 #!/bin/bash
 
-seeds=(42)
-datasets=("dermamnist_256")
+seeds=(1)
+datasets=(dermamnist_256)
 
 for dataset_name in "${datasets[@]}"; do
     dataset_dir="./data/${dataset_name}"
@@ -15,15 +15,13 @@ for dataset_name in "${datasets[@]}"; do
             --cond=1 \
             --num_epochs=200 \
             --accum_steps=1 \
-            --decay_epochs=60,120,160 \
-            --decay_rate=0.2 \
             --warmup_steps=1000 \
             --depth=28 \
             --width_factor=12 \
-            --dropout_rate=0.3 \
+            --dropout_rate=0.0 \
             --lr=1e-4 \
             --seed=$seed \
-            --eval_interval=5 \
+            --eval_interval=1 \
             --exp_type=baseline \
             --train_on_latents=1
     done
