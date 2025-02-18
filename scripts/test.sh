@@ -2,7 +2,7 @@
 
 seeds=(0 1 2 3 4)
 model_type=(wrn)
-strategies=(baseline)
+strategies=(lc)
 ckpt_types=(best final)
 dataset=(organamnist_256)
 dataset_dir="./data/${dataset}"
