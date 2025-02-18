@@ -144,7 +144,7 @@ class Tester:
             ckpt_name = os.path.basename(ckpt).split(".")[0]
             self._save_metrics(ckpt_name, metrics)
 
-    def get_features_and_labels(self, net: torch.nn.Module, ckpt: str):
+    def get_features_and_labels(self, ckpt: str):
         """Get features and labels for TSNE visualization given a checkpoint.
 
         Args:
@@ -155,7 +155,7 @@ class Tester:
             np.ndarray: Intermediate features.
             np.ndarray: Labels.
         """
-        features, labels, images_list, indices_list = self.get_intermediate_features(net, self.test_dataloader)
+        features, labels, images_list, indices_list = self.get_intermediate_features(ckpt)
         return features, labels, images_list, indices_list
 
     def _save_metrics(self, ckpt_name: str, metrics: dict):
@@ -429,7 +429,7 @@ class EGCTester(Tester):
         """
         self._load_checkpoint(ckpt)
         self.ema.eval()
-        feature_extractor = EGCFeatureExtractor(self.ema)
+        feature_extractor = EGCFeatureExtractor(self.ema.ema_model)
 
         features_list = []
         labels_list = []
