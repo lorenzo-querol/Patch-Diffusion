@@ -1,7 +1,7 @@
 #!/bin/bash
 
-seeds=(0 1 2 3 4)
-model_type=(wrn)
+seeds=(0)
+model_type=(egc)
 strategies=(lc)
 ckpt_types=(best final)
 dataset=(organamnist_256)

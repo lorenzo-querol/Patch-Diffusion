@@ -346,8 +346,8 @@ class WRNTester(Tester):
 class EGCTester(Tester):
     """Tester for EGC."""
 
-    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_type, train_on_latents=False):
-        super().__init__(outdir, test_dataset_kwargs, network_kwargs, ckpt_type, train_on_latents)
+    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_dir, ckpt_type, train_on_latents=False):
+        super().__init__(outdir, test_dataset_kwargs, network_kwargs, ckpt_dir, ckpt_type, train_on_latents)
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):
@@ -366,6 +366,10 @@ class EGCTester(Tester):
 
         net.eval()
 
+        num_classes = self.label_dim
+        correct = torch.zeros(num_classes, device=self.device)
+        total = torch.zeros(num_classes, device=self.device)
+
         with tqdm(total=len(dataloader), desc="Testing", dynamic_ncols=True) as pbar:
             for images, labels in dataloader:
                 images, labels = images.to(self.device), labels.to(self.device).argmax(dim=1)
@@ -377,6 +381,13 @@ class EGCTester(Tester):
                 clean_timesteps = torch.zeros(images.size(0), dtype=torch.long, device=self.device)
 
                 logits = net(images, clean_timesteps, cls_mode=True)
+                preds = logits.argmax(dim=1)
+
+                for c in range(num_classes):
+                    class_mask = labels == c
+                    total[c] += class_mask.sum()
+                    correct[c] += (preds[class_mask] == c).sum()
+
                 loss = torch.nn.functional.cross_entropy(logits, labels)
                 acc = (logits.argmax(dim=1) == labels).float().mean()
 
@@ -392,6 +403,16 @@ class EGCTester(Tester):
             }
             pbar.set_postfix(metrics)
             pbar.close()
+
+        # Calculate accuracy per class, handling division by zero
+        acc_per_class = torch.zeros_like(correct, dtype=torch.float32)
+        for c in range(num_classes):
+            if total[c] > 0:
+                acc_per_class[c] = correct[c] / total[c]
+            else:
+                acc_per_class[c] = 0.0
+
+        self._save_accuracy_per_class(acc_per_class)
 
         return metrics
 
