@@ -37,7 +37,7 @@ class DataModule:
                 transforms.RandomCrop(self.img_resolution),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 and self.img_resolution == 256 else x),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if multiplier == 3 else x),
                 transforms.Normalize(mean=[0.5] * multiplier, std=[0.5] * multiplier),
             ]
         )
@@ -45,7 +45,7 @@ class DataModule:
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 and self.img_resolution == 256 else x),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if multiplier == 3 else x),
                 transforms.Normalize(mean=[0.5] * multiplier, std=[0.5] * multiplier),
             ]
         )

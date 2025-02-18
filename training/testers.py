@@ -1,8 +1,8 @@
 import csv
 import os
+from re import M
 
 import numpy as np
-from sklearn.manifold import TSNE
 import torch
 from diffusers import AutoencoderKL
 from ema_pytorch import EMA
@@ -19,7 +19,7 @@ from training.utils import Meter
 class Tester:
     """Generic Tester class."""
 
-    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_type, train_on_latents=False):
+    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_dir, ckpt_type, train_on_latents=False):
         """
         Args:
             outdir (str): Output directory.
@@ -32,6 +32,7 @@ class Tester:
         self.test_dataset_kwargs = test_dataset_kwargs
         self.batch_size = 128
         self.network_kwargs = network_kwargs
+        self.ckpt_dir = ckpt_dir
         self.ckpt_type = ckpt_type
         self.train_on_latents = train_on_latents
 
@@ -59,10 +60,13 @@ class Tester:
         )
         del dataset_obj
 
+        multiplier = 3 if self.img_channels == 1 and self.img_resolution == 256 else 1
+
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5] * self.img_channels, std=[0.5] * self.img_channels),
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1) if multiplier == 3 else x),
+                transforms.Normalize(mean=[0.5] * multiplier, std=[0.5] * multiplier),
             ],
         )
         test_dataset = dnnlib.util.construct_class_by_name(**self.test_dataset_kwargs, transform=transform)
@@ -125,11 +129,14 @@ class Tester:
         Args:
             ckpt_list (list[str]): List of checkpoint paths
         """
+
         if os.path.exists(os.path.join(self.outdir, "test_metrics.csv")):
             os.remove(os.path.join(self.outdir, "test_metrics.csv"))
 
         if os.path.exists(os.path.join(self.outdir, "accuracy_per_class.csv")):
             os.remove(os.path.join(self.outdir, "accuracy_per_class.csv"))
+
+        os.makedirs(self.outdir, exist_ok=True)
 
         for ckpt in ckpt_list:
             self._load_checkpoint(ckpt)
@@ -158,6 +165,7 @@ class Tester:
             ckpt_name (str): Checkpoint name.
             metrics (dict): Metrics to save.
         """
+
         csv_path = os.path.join(self.outdir, f"test_metrics-{self.ckpt_type}.csv")
         file_exists = os.path.isfile(csv_path)
 
@@ -218,8 +226,8 @@ class WRNFeatureExtractor:
 class WRNTester(Tester):
     """Tester for Wide Residual Networks."""
 
-    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_type, train_on_latents=False):
-        super().__init__(outdir, test_dataset_kwargs, network_kwargs, ckpt_type, train_on_latents)
+    def __init__(self, outdir: str, test_dataset_kwargs, network_kwargs, ckpt_dir, ckpt_type, train_on_latents=False):
+        super().__init__(outdir, test_dataset_kwargs, network_kwargs, ckpt_dir, ckpt_type, train_on_latents)
 
     @torch.no_grad()
     def evaluate(self, net: torch.nn.Module, dataloader: DataLoader):

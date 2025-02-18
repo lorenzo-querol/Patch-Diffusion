@@ -1,5 +1,4 @@
 import json
-import math
 import os
 
 import torch
@@ -70,27 +69,16 @@ class WRNTrainer(BaseTrainer):
         # Prepare for distributed training
         self.net, self.ema, self.optimizer = self.accelerator.prepare(self.net, self.ema, self.optimizer)
 
-    def _step_lr(self):
-        # """Step the learning rate. Uses cosine annealing with warmup.
-
-        # If `self.warmup_steps > 0`, then the learning rate is linearly increased from 0 to the initial learning rate.
-        # Else, the learning rate is decayed using cosine annealing.
-        # """
-
-        # if self.warmup_steps > 0 and self.cur_iter < self.warmup_steps:
-        #     warmup_lr = self.optimizer_kwargs.lr * float(self.cur_iter) / float(self.warmup_steps)
-        #     for param_group in self.optimizer.param_groups:
-        #         param_group["lr"] = warmup_lr
-
-        # elif self.warmup_steps > 0 and self.cur_iter >= self.warmup_steps:
-        #     decay_iter = self.cur_iter - self.warmup_steps
-        #     decay_steps = (self.num_epochs * len(self.datamodule.cls_dataloader)) - self.warmup_steps
-        #     for param_group in self.optimizer.param_groups:
-        #         param_group["lr"] = self.optimizer_kwargs.lr * (0.5 * (1 + math.cos(math.pi * decay_iter / decay_steps)))
-
-        if self.cur_epoch in [60, 120, 160]:
+    def _warmup_lr(self):
+        if self.warmup_steps > 0 and self.cur_iter < self.warmup_steps:
+            warmup_lr = self.optimizer_kwargs.lr * float(self.cur_iter) / float(self.warmup_steps)
             for param_group in self.optimizer.param_groups:
-                param_group["lr"] *= 0.2
+                param_group["lr"] = warmup_lr
+
+    def _step_lr(self):
+        if self.cur_epoch in [50, 75]:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] *= 0.1
 
     def fit(self, eval_interval: int):
         """Main training loop.
@@ -124,9 +112,7 @@ class WRNTrainer(BaseTrainer):
 
         dataloader = self.datamodule.cls_dataloader
 
-        with tqdm(
-            total=len(dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
-        ) as pbar:
+        with tqdm(total=len(dataloader), desc=f"Epoch {self.cur_epoch}", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for images, labels in dataloader:
                 labels = labels.argmax(dim=1)
 
@@ -148,6 +134,7 @@ class WRNTrainer(BaseTrainer):
 
                 self._update_ema()
                 self.cur_iter += 1
+                self._warmup_lr()
                 pbar.update(1)
 
             metrics = {
@@ -213,7 +200,7 @@ class WRNTrainer(BaseTrainer):
 
         if metrics["val_cls_ece"] < self.best_val_ece:
             self.best_val_ece = metrics["val_cls_ece"]
-            filename = "model-best_val_ece" if not self.active_learning else f"al_iter_{self.al_mul+1}-best_val_ece"
+            filename = "model-best_val_ece" if not self.active_learning else f"al_iter_{self.al_mul + 1}-best_val_ece"
             self.best_val_ece_path = os.path.join(self.run_dir, f"{filename}.pt")
 
             if self.accelerator.is_main_process:
@@ -221,7 +208,7 @@ class WRNTrainer(BaseTrainer):
 
         if metrics["val_cls_loss"] < self.best_val_loss:
             self.best_val_loss = metrics["val_cls_loss"]
-            filename = "model-best_val_loss" if not self.active_learning else f"al_iter_{self.al_mul+1}-best_val_loss"
+            filename = "model-best_val_loss" if not self.active_learning else f"al_iter_{self.al_mul + 1}-best_val_loss"
             self.best_val_loss_path = os.path.join(self.run_dir, f"{filename}.pt")
 
             if self.accelerator.is_main_process:
@@ -245,9 +232,7 @@ class WRNTrainer(BaseTrainer):
 
         net.eval()
 
-        with tqdm(
-            total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True
-        ) as pbar:
+        with tqdm(total=len(dataloader), desc="Computing Probabilities", disable=not self.accelerator.is_local_main_process, dynamic_ncols=True) as pbar:
             for images, _ in dataloader:
                 if self.train_on_latents:
                     images = self._encode_latents(images)

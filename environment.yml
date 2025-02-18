@@ -9,7 +9,7 @@ dependencies:
   - click
   - pillow
   - scipy
-  - pytorch
+  - pytorch=2.4
   - pytorch-cuda=12.4 # added this line
   - torchvision # added this line
   - psutil

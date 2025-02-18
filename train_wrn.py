@@ -4,6 +4,7 @@ from accelerate import Accelerator
 import dnnlib
 from exp_utils import create_output_directory, generate_run_id
 from training.datamodule import WRNDataModule
+from training.resnet import BasicBlock, Bottleneck
 from training.trainer_active import ActiveLearningTrainer
 from training.trainer_wrn import WRNTrainer
 
@@ -20,11 +21,10 @@ from training.trainer_wrn import WRNTrainer
 @click.option("--accum_steps", help="Number of steps to accumulate gradients over", metavar="INT", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--warmup_steps", help="Number of warmup steps", metavar="INT", type=click.IntRange(min=0), default=0, show_default=True)
 @click.option("--train_on_latents", help="Training on late nt embeddings", metavar="BOOL", type=bool, default=False, show_default=True)
-
+@click.option("--model", help="Model to use", metavar="str", type=click.Choice(["resnet50", "resnet18", "wrn"]), default="wrn", show_default=True)
 # Active learning
 @click.option("--num_samples", help="Number of samples to query", metavar="FLOAT", type=float, default=0.1, show_default=True)
 @click.option("--strategy", help="Active learning strategy", metavar="str", type=click.Choice(["random", "lc", "sm", "entropy"]), default="random", show_default=True)
-
 # Hyperparameters
 @click.option("--depth", help="Network depth (should be 6n+4)", metavar="INT", type=click.IntRange(min=1), default=28, show_default=True)
 @click.option("--width_factor", help="Width factor k", metavar="INT", type=click.IntRange(min=1), default=10, show_default=True)
@@ -32,7 +32,6 @@ from training.trainer_wrn import WRNTrainer
 @click.option("--lr", help="Learning rate", metavar="FLOAT", type=click.FloatRange(min=0, min_open=True), default=0.1, show_default=True)
 @click.option("--optimizer", help="Optimizer", metavar="str", type=click.Choice(["adam", "sgd"]), default="adam", show_default=True)
 @click.option("--use_bn", help="Use batch normalization", metavar="BOOL", type=bool, default=True, show_default=True)
-
 # I/O
 @click.option("--seed", help="Random seed  [default: random]", metavar="INT", type=int, default=1)
 @click.option("--eval_interval", help="How often to evaluate the model on the test dataset", metavar="TICKS", type=click.IntRange(min=0), default=100, show_default=True)
@@ -69,13 +68,26 @@ def main(**kwargs):
     active_learning_kwargs.strategy = opts.strategy
 
     # Training options
-    trainer_kwargs.network_kwargs = dnnlib.EasyDict(
-        class_name="training.wrn.WideResNet",
-        depth=opts.depth,
-        width_factor=opts.width_factor,
-        dropout_rate=opts.dropout_rate,
-        use_bn=opts.use_bn,
-    )
+    if opts.model == "resnet50":
+        trainer_kwargs.network_kwargs = dnnlib.EasyDict(
+            class_name="training.resnet.ResNet",
+            block="Bottleneck",
+            num_blocks=[3, 4, 6, 3],
+        )
+    elif opts.model == "resnet18":
+        trainer_kwargs.network_kwargs = dnnlib.EasyDict(
+            class_name="training.resnet.ResNet",
+            block="BasicBlock",
+            num_blocks=[2, 2, 2, 2],
+        )
+    elif opts.model == "wrn":
+        trainer_kwargs.network_kwargs = dnnlib.EasyDict(
+            class_name="training.wrn.WideResNet",
+            depth=opts.depth,
+            width_factor=opts.width_factor,
+            dropout_rate=opts.dropout_rate,
+            use_bn=opts.use_bn,
+        )
 
     if opts.optimizer == "adam":
         trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.AdamW", lr=opts.lr, weight_decay=0.0)
@@ -83,7 +95,7 @@ def main(**kwargs):
         trainer_kwargs.optimizer_kwargs = dnnlib.EasyDict(class_name="torch.optim.SGD", lr=opts.lr, momentum=0.9, weight_decay=5e-4)
     else:
         raise ValueError(f"Unsupported optimizer: {opts.optimizer}")
-    
+
     trainer_kwargs.num_epochs = opts.num_epochs
     trainer_kwargs.train_on_latents = opts.train_on_latents
     trainer_kwargs.warmup_steps = opts.warmup_steps
@@ -116,10 +128,7 @@ def main(**kwargs):
 
     # Network options
     print_fn("Network options:")
-    print_fn(f"Depth:                   {trainer_kwargs.network_kwargs.depth}")
-    print_fn(f"Width factor:            {trainer_kwargs.network_kwargs.width_factor}")
-    print_fn(f"Dropout rate:            {trainer_kwargs.network_kwargs.dropout_rate}")
-    print_fn(f"Use batch normalization: {trainer_kwargs.network_kwargs.use_bn}")
+    print_fn(f"Model:                   {trainer_kwargs.network_kwargs.class_name}")
     print_fn(f"Optimizer:               {trainer_kwargs.optimizer_kwargs.class_name}")
     print_fn()
 
