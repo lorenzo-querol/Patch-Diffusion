@@ -1,0 +1,2 @@
+checkpoint,test_cls_loss,test_cls_acc,test_cls_ece
+model-final,0.24096108973026276,0.9575318098068237,0.03742392361164093
